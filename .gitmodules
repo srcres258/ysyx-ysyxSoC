@@ -1,3 +1,4 @@
 [submodule "rocket-chip"]
 	path = rocket-chip
-	url = https://github.com/chipsalliance/rocket-chip.git
+	url = https://github.com/srcres258/rocket-chip.git
+	branch = ysyx

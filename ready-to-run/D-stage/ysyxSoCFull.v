@@ -457,7 +457,7 @@ module CPU(
   wire        _cpu_io_lsu_wen;
   wire [31:0] _cpu_io_lsu_wdata;
   wire [3:0]  _cpu_io_lsu_wmask;
-  ysyx_00000000 cpu (
+  ysyx_25070190 cpu (
     .clock            (clock),
     .reset            (reset),
     .io_ifu_addr      (_cpu_io_ifu_addr),

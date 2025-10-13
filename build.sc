@@ -7,7 +7,7 @@ import $file.`rocket-chip`.{common => rocketChipCommon}
 
 val chiselVersion = "7.0.0-M2"
 val defaultScalaVersion = "2.13.14"
-val pwd = os.Path(sys.env("MILL_WORKSPACE_ROOT"))
+val pwd = os.pwd
 
 object v {
   def chiselIvy: Option[Dep] = Some(ivy"org.chipsalliance::chisel:${chiselVersion}")
@@ -82,6 +82,6 @@ trait ysyxSoCModule extends ScalaModule {
 object ysyxsoc extends ysyxSoC
 trait ysyxSoC extends ysyxSoCModule with HasThisChisel {
   override def millSourcePath = pwd
-  override def sources = Task.Sources(millSourcePath / "src")
+  override def sources = T.sources(millSourcePath / "src")
   def rocketModule = rocketchip
 }
