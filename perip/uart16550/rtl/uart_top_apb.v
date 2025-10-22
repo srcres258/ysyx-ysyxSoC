@@ -39,19 +39,21 @@ module uart_top_apb (
    assign reg_adr = in_paddr[2:0]; //assign adr_o   = in_paddr[2:0];
    assign in_prdata  = (in_psel) ? {4{reg_dat8_r}} : 'h0;
    always @ (in_paddr[1:0] or in_pwdata) begin
-             case (in_paddr[1:0])
-             `ifdef ENDIAN_BIG
-             2'b00: reg_dat8_w = #1 in_pwdata[31:24];
-             2'b01: reg_dat8_w = #1 in_pwdata[23:16];
-             2'b10: reg_dat8_w = #1 in_pwdata[15:8];
-             2'b11: reg_dat8_w = #1 in_pwdata[7:0];
-             `else // little-endian -- default
-             2'b00: reg_dat8_w = #1 in_pwdata[7:0];
-             2'b01: reg_dat8_w = #1 in_pwdata[15:8];
-             2'b10: reg_dat8_w = #1 in_pwdata[23:16];
-             2'b11: reg_dat8_w = #1 in_pwdata[31:24];
-             `endif
-             endcase
+            //  case (in_paddr[1:0])
+            //  `ifdef ENDIAN_BIG
+            //  2'b00: reg_dat8_w = #1 in_pwdata[31:24];
+            //  2'b01: reg_dat8_w = #1 in_pwdata[23:16];
+            //  2'b10: reg_dat8_w = #1 in_pwdata[15:8];
+            //  2'b11: reg_dat8_w = #1 in_pwdata[7:0];
+            //  `else // little-endian -- default
+            //  2'b00: reg_dat8_w = #1 in_pwdata[7:0];
+            //  2'b01: reg_dat8_w = #1 in_pwdata[15:8];
+            //  2'b10: reg_dat8_w = #1 in_pwdata[23:16];
+            //  2'b11: reg_dat8_w = #1 in_pwdata[31:24];
+            //  `endif
+            //  endcase
+
+            reg_dat8_w = #1 in_pwdata[7:0];
    end
    always @ (posedge clock) begin
      reg_dat8_w_reg <= reg_dat8_w;
