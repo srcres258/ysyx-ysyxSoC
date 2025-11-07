@@ -43,10 +43,249 @@ class APBSPI(address: Seq[AddressSet])(implicit p: Parameters) extends LazyModul
     val (in, _) = node.in(0)
     val spi_bundle = IO(new SPIIO)
 
+    val controllerAddrSet = address(0)
+    val flashAddrSet = address(1)
+
+    assert(address.size == 2, "APBSPI module expects two address sets: controller and flash.")
+    val device_controller :: device_flash :: Nil = Enum(address.size)
+
+    val controllerHandler = Module(new APBSPI.ControllerHandler)
+    val flashHandler = Module(new APBSPI.FlashHandler)
+
+    val curDevice = RegInit(device_controller)
+    when(in.psel) {
+      when(controllerAddrSet.contains(in.paddr)) {
+        curDevice := device_controller
+      }.elsewhen(flashAddrSet.contains(in.paddr)) {
+        curDevice := device_flash
+      }.otherwise {
+        assert(false.B, "APBSPI: psel is set but cannot determine target device from paddr.")
+      }
+    }
+
+    controllerHandler.io.in.psel := curDevice === device_controller
+    flashHandler.io.in.psel := curDevice === device_flash
+    Seq(controllerHandler, flashHandler).map(_.io).foreach(io => {
+      io.in.penable := in.penable
+      io.in.pwrite := in.pwrite
+      io.in.paddr := in.paddr
+      io.in.pprot := in.pprot
+      io.in.pwdata := in.pwdata
+      io.in.pstrb := in.pstrb
+      io.spi_bundle.miso := spi_bundle.miso
+    })
+    assert(
+      Seq(device_controller, device_flash).map(curDevice === _).reduce(_ || _),
+      "APBSPI: curDevice is invalid."
+    )
+    in.pready := MuxCase(false.B, Seq(
+      (curDevice === device_controller) -> controllerHandler.io.in.pready,
+      (curDevice === device_flash) -> flashHandler.io.in.pready
+    ))
+    in.pslverr := MuxCase(false.B, Seq(
+      (curDevice === device_controller) -> controllerHandler.io.in.pslverr,
+      (curDevice === device_flash) -> flashHandler.io.in.pslverr
+    ))
+    in.prdata := MuxCase(0.U, Seq(
+      (curDevice === device_controller) -> controllerHandler.io.in.prdata,
+      (curDevice === device_flash) -> flashHandler.io.in.prdata
+    ))
+    spi_bundle.sck := MuxCase(false.B, Seq(
+      (curDevice === device_controller) -> controllerHandler.io.spi_bundle.sck,
+      (curDevice === device_flash) -> flashHandler.io.spi_bundle.sck
+    ))
+    spi_bundle.ss := MuxCase(0.U, Seq(
+      (curDevice === device_controller) -> controllerHandler.io.spi_bundle.ss,
+      (curDevice === device_flash) -> flashHandler.io.spi_bundle.ss
+    ))
+    spi_bundle.mosi := MuxCase(false.B, Seq(
+      (curDevice === device_controller) -> controllerHandler.io.spi_bundle.mosi,
+      (curDevice === device_flash) -> flashHandler.io.spi_bundle.mosi
+    ))
+  }
+}
+
+object APBSPI {
+  class HandlerIOBundle extends Bundle {
+    val in = Flipped(new APBBundle(APBBundleParameters(addrBits = 32, dataBits = 32)))
+    val spi_bundle = new SPIIO
+  }
+
+  object HandlerIOBundle {
+    def defaultForMaster(io: HandlerIOBundle): Unit = {
+      io.in.psel := false.B
+      io.in.penable := false.B
+      io.in.pwrite := false.B
+      io.in.paddr := 0.U
+      io.in.pprot := 0.U
+      io.in.pwdata := 0.U
+      io.in.pstrb := 0.U
+      io.spi_bundle.miso := false.B
+    }
+  }
+
+  class Handler(val deviceName: String, val addrRange: Seq[AddressSet]) extends Module {
+    val io = IO(new HandlerIOBundle)
+
+    private val addrValid = Wire(Bool())
+    private val addr = Wire(UInt(32.W))
+    when(io.in.psel) {
+      addrValid := addrRange.map(_.contains(io.in.paddr)).reduce(_ || _)
+      addr := io.in.paddr
+    }.otherwise {
+      addrValid := true.B
+      addr := 0.U
+    }
+    assert(
+      !(io.in.psel && io.in.penable && !addrValid),
+      cf"Invalid paddr provided to $deviceName while psel and penable is asserted. paddr: 0x$addr%x"
+    )
+
     val mspi = Module(new spi_top_apb)
     mspi.io.clock := clock
     mspi.io.reset := reset
-    mspi.io.in <> in
-    spi_bundle <> mspi.io.spi
+    io.spi_bundle <> mspi.io.spi
+  }
+
+  class ControllerHandler extends Handler("controller", AddressSet.misaligned(0x10001000, 0x1000)) {
+    mspi.io.in <> io.in
+  }
+
+  class FlashHandler extends Handler("flash", AddressSet.misaligned(0x30000000, 0x10000000)) {
+    val s_idle :: s_writeCdr :: s_writeCsr_0 :: s_writeSsr :: s_writeTx1 :: s_writeCsr_1 :: (
+      s_readCsr :: s_judge :: s_readRx1 :: s_readRx0 :: s_generateResult :: s_done :: Nil) = Enum(12)
+    val state = RegInit(s_idle)
+    val begin = Wire(Bool())
+    val rwFinished = Wire(Bool())
+    val flashAffairsDone = Wire(Bool())
+    state := MuxLookup(state, s_idle)(List(
+      s_idle -> Mux(begin, s_writeCdr, s_idle),
+      s_writeCdr -> Mux(rwFinished, s_writeCsr_0, s_writeCdr),
+      s_writeCsr_0 -> Mux(rwFinished, s_writeSsr, s_writeCsr_0),
+      s_writeSsr -> Mux(rwFinished, s_writeTx1, s_writeSsr),
+      s_writeTx1 -> Mux(rwFinished, s_writeCsr_1, s_writeTx1),
+      s_writeCsr_1 -> Mux(rwFinished, s_readCsr, s_writeCsr_1),
+      s_readCsr -> Mux(rwFinished, s_judge, s_readCsr),
+      s_judge -> Mux(flashAffairsDone, s_readRx1, s_readCsr),
+      s_readRx1 -> Mux(rwFinished, s_readRx0, s_readRx1),
+      s_readRx0 -> Mux(rwFinished, s_generateResult, s_readRx0),
+      s_generateResult -> s_done,
+      s_done -> s_idle
+    ))
+
+    val apbS_idle :: apbS_read_waitPReady :: apbS_write_waitPReady :: apbS_done :: Nil = Enum(4)
+    val apbState = RegInit(apbS_idle)
+    val apbReadBegin = Wire(Bool())
+    val apbWriteBegin = Wire(Bool())
+    val apbPReady = Wire(Bool())
+    apbState := MuxLookup(apbState, apbS_idle)(List(
+      apbS_idle -> MuxCase(apbS_idle, Seq(
+        apbReadBegin -> apbS_read_waitPReady,
+        apbWriteBegin -> apbS_write_waitPReady
+      )),
+
+      apbS_read_waitPReady -> Mux(apbPReady, apbS_done, apbS_read_waitPReady),
+
+      apbS_write_waitPReady -> Mux(apbPReady, apbS_done, apbS_write_waitPReady),
+
+      apbS_done -> apbS_idle
+    ))
+
+    begin := io.in.psel && io.in.penable
+    assert(!(begin && io.in.pwrite), "APBSPI: writing to flash is not supported.")
+
+    apbReadBegin := Seq(s_readCsr, s_readRx1, s_readRx0)
+      .map(state === _).reduce(_ || _)
+    apbWriteBegin := Seq(s_writeCdr, s_writeCsr_0, s_writeSsr, s_writeTx1, s_writeCsr_1)
+      .map(state === _).reduce(_ || _)
+    val apbPAddr = Wire(UInt(32.W))
+    apbPAddr := MuxCase(0.U, Seq(
+      (state === s_writeCdr) -> FlashHandler.SPI_CDR_ADDR.U,
+      (state === s_writeCsr_0) -> FlashHandler.SPI_CSR_ADDR.U,
+      (state === s_writeSsr) -> FlashHandler.SPI_SSR_ADDR.U,
+      (state === s_writeTx1) -> FlashHandler.SPI_TX1_ADDR.U,
+      (state === s_writeCsr_1) -> FlashHandler.SPI_CSR_ADDR.U,
+      (state === s_readCsr) -> FlashHandler.SPI_CSR_ADDR.U,
+      (state === s_readRx1) -> FlashHandler.SPI_RX1_ADDR.U,
+      (state === s_readRx0) -> FlashHandler.SPI_RX0_ADDR.U
+    ))
+
+    mspi.io.in.pwrite := apbWriteBegin
+    mspi.io.in.psel := apbReadBegin || apbWriteBegin
+    mspi.io.in.paddr := apbPAddr
+    mspi.io.in.penable := Seq(apbS_read_waitPReady, apbS_write_waitPReady)
+      .map(apbState === _).reduce(_ || _)
+    mspi.io.in.pprot := 0.U
+    mspi.io.in.pstrb := 0b1111.U
+    private def pwdata: UInt = {
+      val u32w = 32.W
+      val csr = Wire(UInt(u32w))
+      val csr1 = Wire(UInt(u32w))
+      val flashAddr = Wire(UInt(u32w))
+      val value = Wire(UInt(u32w))
+
+      csr := (1.U(u32w) << 13) | (1.U << 9) | 64.U
+      csr1 := csr | (1.U << 8)
+      flashAddr := io.in.paddr - FlashHandler.FLASH_ADDR.U(u32w)
+      value := (0x03.U(u32w) << 24) | flashAddr
+
+      MuxCase(0.U, Seq(
+        (state === s_writeCdr) -> 1.U,
+        (state === s_writeCsr_0) -> csr,
+        (state === s_writeSsr) -> 1.U,
+        (state === s_writeTx1) -> value,
+        (state === s_writeCsr_1) -> csr1
+      ))
+    }
+    mspi.io.in.pwdata := Mux(mspi.io.in.pwrite, pwdata, 0.U)
+    apbPReady := mspi.io.in.pready
+    val prdata = RegInit(0.U(32.W))
+    val pslverr = RegInit(false.B)
+    when(apbState === apbS_read_waitPReady && apbPReady) {
+      prdata := mspi.io.in.prdata
+      pslverr := mspi.io.in.pslverr
+    }.elsewhen(apbState === apbS_write_waitPReady && apbPReady) {
+      prdata := 0.U
+      pslverr := mspi.io.in.pslverr
+    }
+    assert(!pslverr, "APBSPI: pslverr is set inside flash, which is not expected.")
+    rwFinished := apbState === apbS_done
+    
+    val csr_recv = RegInit(0.U(32.W))
+    val result = RegInit(0.U(32.W))
+    val recv = RegInit(0.U(64.W))
+
+    when(state === s_readCsr && apbState === apbS_done) {
+      csr_recv := prdata
+    }.elsewhen(state === s_readRx1 && apbState === apbS_done) {
+      recv := prdata << 32
+    }.elsewhen(state === s_readRx0 && apbState === apbS_done) {
+      recv := (recv | prdata) >> 1
+    }.elsewhen(state === s_generateResult) {
+      result := ((recv & 0x000000FFL.U) << 24) |
+                ((recv & 0x0000FF00L.U) << 8) |
+                ((recv & 0x00FF0000L.U) >> 8) |
+                ((recv & 0xFF000000L.U) >> 24)
+    }
+    flashAffairsDone := !csr_recv(8)
+    io.in.prdata := result
+    io.in.pslverr := false.B
+    io.in.pready := state === s_done
+  }
+
+  object FlashHandler {
+    val FLASH_ADDR = 0x30000000L
+
+    val SPI_RX0_ADDR = 0x00
+    val SPI_RX1_ADDR = 0x04
+    val SPI_RX2_ADDR = 0x08
+    val SPI_RX3_ADDR = 0x0C
+    val SPI_TX0_ADDR = 0x00
+    val SPI_TX1_ADDR = 0x04
+    val SPI_TX2_ADDR = 0x08
+    val SPI_TX3_ADDR = 0x0C
+    val SPI_CSR_ADDR = 0x10
+    val SPI_CDR_ADDR = 0x14
+    val SPI_SSR_ADDR = 0x18
   }
 }
