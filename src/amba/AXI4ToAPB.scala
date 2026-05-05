@@ -86,7 +86,7 @@ class AXI4ToAPB(val aFlow: Boolean = true)(implicit p: Parameters) extends LazyM
       val resp = Mux(out.pslverr, AXI4Parameters.RESP_SLVERR, AXI4Parameters.RESP_OKAY)
       val resp_hold = resp holdUnless (state === s_inflight)
       r.valid  := !is_write && (((state === s_inflight) && out.pready) || (state === s_wait_rready_bready))
-      r.bits.data := Fill(2, out.prdata holdUnless (state === s_inflight))
+      r.bits.data := Fill(2, (out.prdata >> Cat(araddr_reg(1,0), 0.U(3.W))) holdUnless (state === s_inflight))
       r.bits.id   := rid_reg
       r.bits.resp := resp_hold
       r.bits.last := true.B

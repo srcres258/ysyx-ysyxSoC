@@ -127,6 +127,9 @@ module PSRAM_READER (
                         (counter == 12) ?   saddr[7:4]          :
                         (counter == 13) ?   saddr[3:0]          :
                         4'h0;
+`ifdef PS_DEBUG
+    always @(posedge clk) if (state == READ && (counter < 14)) $display("[rdr] counter=%d dout=%b saddr=%h", counter, dout, saddr);
+`endif
 
     assign douten   = (counter < 14);
 
@@ -212,21 +215,22 @@ module PSRAM_WRITER (
         else if((state == IDLE) && wr)
             saddr <= addr;
 
-    assign dout     =   (counter < 8)   ?   {3'b0, CMD_38H[7 - counter]}:
-                        (counter == 8)  ?   saddr[23:20]        :
-                        (counter == 9)  ?   saddr[19:16]        :
-                        (counter == 10) ?   saddr[15:12]        :
-                        (counter == 11) ?   saddr[11:8]         :
-                        (counter == 12) ?   saddr[7:4]          :
-                        (counter == 13) ?   saddr[3:0]          :
-                        (counter == 14) ?   line[7:4]           :
-                        (counter == 15) ?   line[3:0]           :
-                        (counter == 16) ?   line[15:12]         :
-                        (counter == 17) ?   line[11:8]          :
-                        (counter == 18) ?   line[23:20]         :
-                        (counter == 19) ?   line[19:16]         :
-                        (counter == 20) ?   line[31:28]         :
-                        line[27:24];
+    assign dout     =   (counter <= FINAL_COUNT || counter < 14) ?
+                        ((counter < 8)   ?   {3'b0, CMD_38H[7 - counter]}:
+                         (counter == 8)  ?   saddr[23:20]        :
+                         (counter == 9)  ?   saddr[19:16]        :
+                         (counter == 10) ?   saddr[15:12]        :
+                         (counter == 11) ?   saddr[11:8]         :
+                         (counter == 12) ?   saddr[7:4]          :
+                         (counter == 13) ?   saddr[3:0]          :
+                         (counter == 14) ?   line[7:4]           :
+                         (counter == 15) ?   line[3:0]           :
+                         (counter == 16) ?   line[15:12]         :
+                         (counter == 17) ?   line[11:8]          :
+                         (counter == 18) ?   line[23:20]         :
+                         (counter == 19) ?   line[19:16]         :
+                         (counter == 20) ?   line[31:28]         :
+                         line[27:24]) : 4'h0;
 
     assign douten   = (~ce_n);
 

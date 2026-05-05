@@ -168,5 +168,5 @@ module EF_PSRAM_CTRL_wb (
 
     assign mw_din = din;
     assign mr_din = din;
-    assign ack_o = wb_we ? mw_done :mr_done ;
+    assign ack_o = wb_we ? mw_done : mr_done;
 endmodule
