@@ -9,6 +9,10 @@
  *      - 地址: 左移 4 位 (一个 nibble)
  *      修复: 命令匹配使用移位值; 地址使用 eff_addr = address>>4.
  *   3. CE# 复位时清除 address/command 寄存器.
+ *   4. QPI mode (4-4-4): 上电为 SPI/QSPI 模式, 收到 0x35 命令后切换到 QPI 模式,
+ *      在 QPI 模式下命令以 4-bit 传输 (2 个 sck 周期); 收到 0xF5 退出.
+ *      QPI 命令相位补偿: S_IDLE 捕获 CMD_LO nibble, 匹配 command[7:4].
+ *      地址/数据捕获与 SPI 模式一致 (addr_cnt=0, 相同 nibble 时序).
  */
 module psram #(
   parameter ADDR_BITS    = 22,
@@ -18,10 +22,11 @@ module psram #(
   input        ce_n,
   inout  [3:0] dio
 );
-  localparam MEM_SIZE     = 1 << ADDR_BITS;
-  localparam CMD_CYCLES   = 8;
-  localparam ADDR_CYCLES  = 6;
-  localparam DATA_CYCLES  = 8;
+  localparam MEM_SIZE       = 1 << ADDR_BITS;
+  localparam CMD_CYCLES     = 8;
+  localparam CMD_QPI_CYCLES = 2;
+  localparam ADDR_CYCLES    = 6;
+  localparam DATA_CYCLES    = 8;
 
   localparam S_IDLE     = 0;
   localparam S_CMD      = 1;
@@ -32,7 +37,14 @@ module psram #(
 
   localparam CMD_EB_SHIFTED = 8'hD6;
   localparam CMD_38_SHIFTED = 8'h70;
+  localparam CMD_EBH         = 8'hEB;  // Quad IO Read
+  localparam CMD_38H         = 8'h38;  // Quad IO Write
+  localparam CMD_35H         = 8'h35;  // Enter QPI mode
+  localparam CMD_35_SHIFTED  = 8'h6A;  // 0x35 << 1 (phase shift)
+  localparam CMD_F5H         = 8'hF5;  // Exit QPI mode
+  localparam CMD_F5_SHIFTED  = 8'hEA;  // 0xF5 << 1 (phase shift)
 
+  reg                 qpi_mode;       // 0=SPI/QSPI, 1=QPI (4-4-4)
   reg [7:0]           memory [0:MEM_SIZE-1];
   reg [3:0]           state;
   reg [7:0]           command;
@@ -52,10 +64,18 @@ module psram #(
 
   integer i;
   initial begin
-    state = S_IDLE; command = 0; address = 0;
-    cmd_cnt = 0; addr_cnt = 0; dummy_cnt = 0; data_cnt = 0;
-    io_oe = 0; io_out = 0;
-    for (i = 0; i < MEM_SIZE; i = i + 1) memory[i] = 0;
+    qpi_mode = 0;
+    state = S_IDLE;
+    command = 0;
+    address = 0;
+    cmd_cnt = 0;
+    addr_cnt = 0;
+    dummy_cnt = 0;
+    data_cnt = 0;
+    io_oe = 0;
+    io_out = 0;
+    for (i = 0; i < MEM_SIZE; i = i + 1)
+      memory[i] = 0;
   end
 
   // ---- 主状态机: negedge sck (命令/地址/写数据捕获, 状态转换) ----
@@ -67,12 +87,52 @@ module psram #(
     else begin
       case (state)
         S_IDLE: begin
-          command <= {7'h0, dio[0]}; cmd_cnt <= 1; state <= S_CMD;
+          if (qpi_mode) begin
+            // QPI mode: capture upper nibble (command[7:4])
+            command[7:4] <= dio;
+            cmd_cnt <= 1; state <= S_CMD;
+          end
+          else begin
+            // SPI mode: capture command MSB
+            command <= {7'h0, dio[0]}; cmd_cnt <= 1; state <= S_CMD;
+          end
         end
         S_CMD: begin
-          command <= {command[6:0], dio[0]};
-          if (cmd_cnt == CMD_CYCLES - 1) begin addr_cnt <= 0; state <= S_ADDR; end
-          else begin cmd_cnt <= cmd_cnt + 1; end
+          if (qpi_mode) begin
+            // QPI mode: capture lower nibble (command[3:0])
+            command[3:0] <= dio;
+            if (cmd_cnt == CMD_QPI_CYCLES - 1) begin
+              // 相位补偿: S_IDLE 捕获的是 CMD_LO (bit[3:0]),
+              // 因此只匹配 command[7:4] (= CMD_LO nibble) 来识别命令.
+              if (command[7:4] == CMD_F5H[3:0] || command[7:4] == CMD_F5_SHIFTED[3:0]) begin
+                qpi_mode <= 0; state <= S_IDLE;
+              end
+              else if (command[7:4] == CMD_EBH[3:0] || command[7:4] == CMD_EB_SHIFTED[3:0] ||
+                           command[7:4] == CMD_38H[3:0] || command[7:4] == CMD_38_SHIFTED[3:0]) begin
+                addr_cnt <= 0; state <= S_ADDR;
+              end
+              else
+                state <= S_IDLE;
+            end
+            else begin
+              cmd_cnt <= cmd_cnt + 1;
+            end
+          end
+          else begin
+            // SPI mode: capture command 1 bit at a time
+            command <= {command[6:0], dio[0]};
+            if (cmd_cnt == CMD_CYCLES - 1) begin
+              if ({command[6:0], dio[0]} == CMD_35H || {command[6:0], dio[0]} == CMD_35_SHIFTED) begin
+                qpi_mode <= 1; state <= S_IDLE;
+              end
+              else begin
+                addr_cnt <= 0; state <= S_ADDR;
+              end
+            end
+            else begin
+              cmd_cnt <= cmd_cnt + 1;
+            end
+          end
         end
         S_ADDR: begin
           address[20-(addr_cnt*4)] <= dio[0];
@@ -82,9 +142,28 @@ module psram #(
             address[23-(addr_cnt*4)] <= dio[3];
           end
           if (addr_cnt == ADDR_CYCLES - 1) begin
-            if (command == 8'hEB || command == CMD_EB_SHIFTED) begin
+            if (qpi_mode) begin
+              // QPI 模式: 仅匹配 command[7:4] (S_IDLE 捕获的 CMD_LO nibble)
+              if (command[7:4] == CMD_EBH[3:0] || command[7:4] == CMD_EB_SHIFTED[3:0]) begin
+                dummy_cnt <= 0; state <= S_DUMMY;
+              end
+              else if (command[7:4] == CMD_38H[3:0] || command[7:4] == CMD_38_SHIFTED[3:0]) begin
+                // QPI 写: 在转换周期同时捕获第一个写数据 nibble (D7:4)
+                memory[eff_addr][4] <= dio[0];
+                memory[eff_addr][5] <= dio[1];
+                memory[eff_addr][6] <= dio[2];
+                memory[eff_addr][7] <= dio[3];
+                data_cnt <= 1;   // 已捕获 upper nibble
+                state    <= S_DATA_IN;
+              end
+              else
+                state <= S_IDLE;
+            end
+          else begin
+            if (command == CMD_EBH || command == CMD_EB_SHIFTED) begin
               dummy_cnt <= 0; state <= S_DUMMY;
-            end else if (command == 8'h38 || command == CMD_38_SHIFTED) begin
+            end
+            else if (command == CMD_38H || command == CMD_38_SHIFTED) begin
               // 关键: 在转换周期同时捕获第一个写数据 nibble (D7:4)
               // 以避免因过渡周期导致数据错位 (nibble swap)
               memory[eff_addr][4] <= dio[0];
@@ -93,31 +172,49 @@ module psram #(
               memory[eff_addr][7] <= dio[3];
               data_cnt <= 1;   // 已捕获 upper nibble
               state    <= S_DATA_IN;
-            end else state <= S_IDLE;
-          end else begin
+            end
+            else state <= S_IDLE;
+            end
+          end
+          else begin
             addr_cnt <= addr_cnt + 1;
           end
         end
         S_DUMMY: begin
           if (dummy_cnt == DUMMY_CYCLES - 1) begin
-            if (command == 8'hEB || command == CMD_EB_SHIFTED) begin
-              data_cnt <= 0; io_oe <= 1; state <= S_DATA_OUT;
-            end else state <= S_IDLE;
+            if (qpi_mode) begin
+              if (command[7:4] == CMD_EBH[3:0] || command[7:4] == CMD_EB_SHIFTED[3:0]) begin
+                data_cnt <= 0; io_oe <= 1; state <= S_DATA_OUT;
+              end
+              else
+                state <= S_IDLE;
+            end
+            else begin
+              if (command == CMD_EBH || command == CMD_EB_SHIFTED) begin
+                data_cnt <= 0; io_oe <= 1; state <= S_DATA_OUT;
+              end
+              else
+                state <= S_IDLE;
+            end
           end else dummy_cnt <= dummy_cnt + 1;
         end
         S_DATA_OUT: begin
-          if (data_cnt == DATA_CYCLES) begin io_oe <= 0; state <= S_IDLE; end
+          if (data_cnt == DATA_CYCLES) begin
+            io_oe <= 0; state <= S_IDLE;
+          end
           else data_cnt = data_cnt + 1;
         end
         S_DATA_IN: begin
-          if (data_cnt == DATA_CYCLES) state <= S_IDLE;
+          if (data_cnt == DATA_CYCLES)
+            state <= S_IDLE;
           else begin
             if (data_cnt[0]) begin
               memory[eff_addr + data_idx][0] <= dio[0];
               memory[eff_addr + data_idx][1] <= dio[1];
               memory[eff_addr + data_idx][2] <= dio[2];
               memory[eff_addr + data_idx][3] <= dio[3];
-            end else begin
+            end
+            else begin
               memory[eff_addr + data_idx][4] <= dio[0];
               memory[eff_addr + data_idx][5] <= dio[1];
               memory[eff_addr + data_idx][6] <= dio[2];

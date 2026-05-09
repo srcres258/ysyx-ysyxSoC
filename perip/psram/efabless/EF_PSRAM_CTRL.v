@@ -47,6 +47,7 @@ module PSRAM_READER (
     input   wire [23:0]     addr,
     input   wire            rd,
     input   wire [2:0]      size,
+    input   wire            qpi_mode,       // 0=SPI/QSPI, 1=QPI (4-4-4)
     output  wire            done,
     output  wire [31:0]     line,
 
@@ -60,7 +61,10 @@ module PSRAM_READER (
     localparam  IDLE = 1'b0,
                 READ = 1'b1;
 
-    wire [7:0]  FINAL_COUNT = 19 + size*2; // was 27: Always read 1 word
+    // SPI mode: counter 0..7=cmd, 8..13=addr, 14..19=dummy, 20+(size*2)=data
+    // QPI mode: counter 0..1=cmd, 2..7=addr, 8..13=dummy, 14+(size*2)=data
+    //   data window starts at counter_old=14 (after transition 13→14)
+    wire [7:0]  FINAL_COUNT = qpi_mode ? (13 + size*2) : (19 + size*2);
 
     reg         state, nstate;
     reg [7:0]   counter;
@@ -113,25 +117,44 @@ module PSRAM_READER (
             saddr <= {addr[23:0]};
 
     // Sample with the negedge of sck
-    wire[1:0] byte_index = {counter[7:1] - 8'd10}[1:0];
+    // SPI: data starts at counter_old=20, byte_index = (counter/2 - 10) % 4
+    // QPI: data starts at counter_old=14, byte_index = (counter/2 - 7) % 4
+    wire[1:0] byte_index = qpi_mode
+        ? {counter[7:1] - 8'd7}[1:0]
+        : {counter[7:1] - 8'd10}[1:0];
     always @ (posedge clk)
-        if(counter >= 20 && counter <= FINAL_COUNT)
+        if (qpi_mode
+            ? (counter >= 14 && counter <= FINAL_COUNT)
+            : (counter >= 20 && counter <= FINAL_COUNT))
             if(sck)
                 data[byte_index] <= {data[byte_index][3:0], din}; // Optimize!
 
-    assign dout     =   (counter < 8)   ?   {3'b0, CMD_EBH[7 - counter]}:
-                        (counter == 8)  ?   saddr[23:20]        :
-                        (counter == 9)  ?   saddr[19:16]        :
-                        (counter == 10) ?   saddr[15:12]        :
-                        (counter == 11) ?   saddr[11:8]         :
-                        (counter == 12) ?   saddr[7:4]          :
-                        (counter == 13) ?   saddr[3:0]          :
-                        4'h0;
+    assign dout     =   qpi_mode ?
+                        ((counter == 0)  ? CMD_EBH[7:4] :
+                         (counter == 1)  ? CMD_EBH[3:0] :
+                         (counter == 2)  ? saddr[23:20]   :
+                         (counter == 3)  ? saddr[19:16]   :
+                         (counter == 4)  ? saddr[15:12]   :
+                         (counter == 5)  ? saddr[11:8]    :
+                         (counter == 6)  ? saddr[7:4]     :
+                         (counter == 7)  ? saddr[3:0]     :
+                         4'h0) :
+                        ((counter < 8)   ? {3'b0, CMD_EBH[7 - counter]}:
+                         (counter == 8)  ? saddr[23:20]        :
+                         (counter == 9)  ? saddr[19:16]        :
+                         (counter == 10) ? saddr[15:12]        :
+                         (counter == 11) ? saddr[11:8]         :
+                         (counter == 12) ? saddr[7:4]          :
+                         (counter == 13) ? saddr[3:0]          :
+                         4'h0);
 `ifdef PS_DEBUG
     always @(posedge clk) if (state == READ && (counter < 14)) $display("[rdr] counter=%d dout=%b saddr=%h", counter, dout, saddr);
 `endif
+`ifdef QPI_DEBUG
+    always @(posedge clk) if (state == READ && qpi_mode) $display("[rdr-QPI] sck=%d counter=%d dout=%b saddr=%h", sck, counter, dout, saddr);
+`endif
 
-    assign douten   = (counter < 14);
+    assign douten   = qpi_mode ? (counter < 8) : (counter < 14);
 
     assign done     = (counter == FINAL_COUNT+1);
 
@@ -152,6 +175,7 @@ module PSRAM_WRITER (
     input   wire [31: 0]    line,
     input   wire [2:0]      size,
     input   wire            wr,
+    input   wire            qpi_mode,       // 0=SPI/QSPI, 1=QPI (4-4-4)
     output  wire            done,
 
     output  reg             sck,
@@ -164,7 +188,9 @@ module PSRAM_WRITER (
     localparam  IDLE = 1'b0,
                 WRITE = 1'b1;
 
-    wire[7:0]        FINAL_COUNT = 13 + size*2;
+    // SPI mode: counter 0..7=cmd, 8..13=addr, 14+(size*2)=data
+    // QPI mode: counter 0..1=cmd, 2..7=addr, 8+(size*2)=data
+    wire[7:0]        FINAL_COUNT = qpi_mode ? (7 + size*2) : (13 + size*2);
 
     reg         state, nstate;
     reg [7:0]   counter;
@@ -215,22 +241,40 @@ module PSRAM_WRITER (
         else if((state == IDLE) && wr)
             saddr <= addr;
 
-    assign dout     =   (counter <= FINAL_COUNT || counter < 14) ?
-                        ((counter < 8)   ?   {3'b0, CMD_38H[7 - counter]}:
-                         (counter == 8)  ?   saddr[23:20]        :
-                         (counter == 9)  ?   saddr[19:16]        :
-                         (counter == 10) ?   saddr[15:12]        :
-                         (counter == 11) ?   saddr[11:8]         :
-                         (counter == 12) ?   saddr[7:4]          :
-                         (counter == 13) ?   saddr[3:0]          :
-                         (counter == 14) ?   line[7:4]           :
-                         (counter == 15) ?   line[3:0]           :
-                         (counter == 16) ?   line[15:12]         :
-                         (counter == 17) ?   line[11:8]          :
-                         (counter == 18) ?   line[23:20]         :
-                         (counter == 19) ?   line[19:16]         :
-                         (counter == 20) ?   line[31:28]         :
-                         line[27:24]) : 4'h0;
+    assign dout     =   qpi_mode ?
+                        ((counter <= FINAL_COUNT) ?
+                         ((counter == 0)  ? CMD_38H[7:4] :
+                          (counter == 1)  ? CMD_38H[3:0] :
+                          (counter == 2)  ? saddr[23:20]   :
+                          (counter == 3)  ? saddr[19:16]   :
+                          (counter == 4)  ? saddr[15:12]   :
+                          (counter == 5)  ? saddr[11:8]    :
+                          (counter == 6)  ? saddr[7:4]     :
+                          (counter == 7)  ? saddr[3:0]     :
+                          (counter == 8)  ? line[7:4]      :
+                          (counter == 9)  ? line[3:0]      :
+                          (counter == 10) ? line[15:12]    :
+                          (counter == 11) ? line[11:8]     :
+                          (counter == 12) ? line[23:20]    :
+                          (counter == 13) ? line[19:16]    :
+                          (counter == 14) ? line[31:28]    :
+                          line[27:24]) : 4'h0) :
+                        ((counter <= FINAL_COUNT || counter < 14) ?
+                         ((counter < 8)   ?   {3'b0, CMD_38H[7 - counter]}:
+                          (counter == 8)  ?   saddr[23:20]        :
+                          (counter == 9)  ?   saddr[19:16]        :
+                          (counter == 10) ?   saddr[15:12]        :
+                          (counter == 11) ?   saddr[11:8]         :
+                          (counter == 12) ?   saddr[7:4]          :
+                          (counter == 13) ?   saddr[3:0]          :
+                          (counter == 14) ?   line[7:4]           :
+                          (counter == 15) ?   line[3:0]           :
+                          (counter == 16) ?   line[15:12]         :
+                          (counter == 17) ?   line[11:8]          :
+                          (counter == 18) ?   line[23:20]         :
+                          (counter == 19) ?   line[19:16]         :
+                          (counter == 20) ?   line[31:28]         :
+                          line[27:24]) : 4'h0);
 
     assign douten   = (~ce_n);
 
