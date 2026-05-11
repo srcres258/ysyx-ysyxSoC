@@ -34,7 +34,7 @@ module flash (
     else begin
       case (state)
         cmd_t:  state <= (counter == 8'd7 ) ? addr_t : state;
-        addr_t: state <= (cmd     != 8'h3 ) ? err_t  :
+        addr_t: state <= (cmd     != 8'h3 && cmd != 8'h0f) ? err_t  :
                          (counter == 8'd23) ? data_t : state;
         data_t: state <= state;
 
@@ -92,7 +92,7 @@ module flash_cmd(
 );
   always@(posedge clock) begin
     if (valid)
-      if (cmd == 8'h03) flash_read(addr, data);
+      if (cmd == 8'h03 || cmd == 8'h0f) flash_read(addr, data);
       else begin
         $fwrite(32'h80000002, "Assertion failed: Unsupport command `%xh`, only support `03h` read command\n", cmd);
         $fatal;

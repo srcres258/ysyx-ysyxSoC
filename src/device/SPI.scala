@@ -298,7 +298,7 @@ object APBSPI {
       csr := (1.U(u32w) << 13) | (1.U << 9) | 64.U
       csr1 := csr | (1.U << 8)
       flashAddr := io.in.paddr - FlashHandler.FLASH_ADDR.U(u32w)
-      value := (0x03.U(u32w) << 24) | flashAddr
+      value := (0x03.U(u32w) << 24) | (flashAddr & 0x00FFFFFFL.U)
 
       MuxCase(0.U, Seq(
         (state === s_writeCdr) -> 1.U,
