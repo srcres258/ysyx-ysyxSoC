@@ -43,15 +43,32 @@ class ysyxSoCASIC(implicit p: Parameters) extends LazyModule {
   val lmrom = LazyModule(new AXI4MROM(AddressSet.misaligned(0x20000000, 0x1000)))
   val sramNode = AXI4RAM(AddressSet.misaligned(0x0f000000, 0x2000).head, false, true, 4, None, Nil, false)
 
-  val sdramAddressSet = AddressSet.misaligned(0xa0000000L, 0x2000000)
-  val lsdram_apb = if (!Config.sdramUseAXI) Some(LazyModule(new APBSDRAM (sdramAddressSet))) else None
-  val lsdram_axi = if ( Config.sdramUseAXI) Some(LazyModule(new AXI4SDRAM(sdramAddressSet))) else None
+  // SDRAM address space — computed from Config
+  val sdramAddrSets = SDRAMAddr.addressSets  // Seq[AddressSet], 1 or 2 entries
+  val sdramHasWordExt = Config.sdramBitExt && Config.sdramWordExt
+
+  // Channel 0 (always present)
+  val lsdram_apb = if (!Config.sdramUseAXI)
+    Some(LazyModule(new APBSDRAM (Seq(sdramAddrSets(0))))) else None
+  val lsdram_axi = if ( Config.sdramUseAXI)
+    Some(LazyModule(new AXI4SDRAM(Seq(sdramAddrSets(0))))) else None
+
+  // Channel 1 (only when word extension is active)
+  val lsdram_apb_ch1 = if (!Config.sdramUseAXI && sdramHasWordExt)
+    Some(LazyModule(new APBSDRAM (Seq(sdramAddrSets(1))))) else None
+  val lsdram_axi_ch1 = if ( Config.sdramUseAXI && sdramHasWordExt)
+    Some(LazyModule(new AXI4SDRAM(Seq(sdramAddrSets(1))))) else None
 
   List(lspi.node, luart.node, lpsram.node, lgpio.node, lkeyboard.node, lvga.node).map(_ := apbxbar)
   List(apbxbar := APBDelayer() := AXI4ToAPB() := AXI4Buffer(), lmrom.node, sramNode).map(_ := xbar2)
   xbar2 := AXI4UserYanker(Some(1)) := AXI4Fragmenter() := xbar
-  if (Config.sdramUseAXI) lsdram_axi.get.node := ysyx.AXI4Delayer() := xbar
-  else                    lsdram_apb.get.node := apbxbar
+  if (Config.sdramUseAXI) {
+    lsdram_axi.get.node := ysyx.AXI4Delayer() := xbar
+    if (lsdram_axi_ch1.isDefined) lsdram_axi_ch1.get.node := ysyx.AXI4Delayer() := xbar
+  } else {
+    lsdram_apb.get.node := apbxbar
+    if (lsdram_apb_ch1.isDefined) lsdram_apb_ch1.get.node := apbxbar
+  }
   if (Config.hasChipLink) chiplinkNode.get := xbar
   xbar := cpu.masterNode
 
@@ -79,24 +96,35 @@ class ysyxSoCASIC(implicit p: Parameters) extends LazyModule {
     val intr_from_chipSlave = IO(Input(Bool()))
     cpu.module.interrupt := intr_from_chipSlave
 
-    val sdramBundle = if (Config.sdramUseAXI) lsdram_axi.get.module.sdram_bundle
-                      else                    lsdram_apb.get.module.sdram_bundle
+    // --- SDRAM port(s) ---
+    val sdramBundle0 = if (Config.sdramUseAXI) lsdram_axi.get.module.sdram_bundle
+                       else                    lsdram_apb.get.module.sdram_bundle
 
     // expose slave I/O interface as ports
     val spi = IO(chiselTypeOf(lspi.module.spi_bundle))
     val uart = IO(chiselTypeOf(luart.module.uart))
     val psram = IO(chiselTypeOf(lpsram.module.qspi_bundle))
-    val sdram = IO(chiselTypeOf(sdramBundle))
+    val sdram = IO(chiselTypeOf(sdramBundle0))
     val gpio = IO(chiselTypeOf(lgpio.module.gpio_bundle))
     val ps2 = IO(chiselTypeOf(lkeyboard.module.ps2_bundle))
     val vga = IO(chiselTypeOf(lvga.module.vga_bundle))
     uart <> luart.module.uart
     spi <> lspi.module.spi_bundle
     psram <> lpsram.module.qspi_bundle
-    sdram <> sdramBundle
+    sdram <> sdramBundle0
     gpio <> lgpio.module.gpio_bundle
     ps2 <> lkeyboard.module.ps2_bundle
     vga <> lvga.module.vga_bundle
+
+    // Channel 1 SDRAM port (only when word extension is active)
+    // Use Option pattern so the field always exists in the type — similar to fpga_io.
+    val sdram1 = if (Config.sdramBitExt && Config.sdramWordExt) {
+      val sdramBundle1 = if (Config.sdramUseAXI) lsdram_axi_ch1.get.module.sdram_bundle
+                         else                    lsdram_apb_ch1.get.module.sdram_bundle
+      val io1 = IO(chiselTypeOf(sdramBundle1))
+      io1 <> sdramBundle1
+      Some(io1)
+    } else None
   }
 }
 
@@ -142,8 +170,22 @@ class ysyxSoCFull(implicit p: Parameters) extends LazyModule {
 
     val psram = Module(new psram)
     psram.io <> masic.psram
-    val sdram = Module(new sdramChisel)
-    sdram.io <> masic.sdram
+    // SDRAM behavior model — instantiate 1, 2, or 4颗粒 based on Config
+    if (Config.sdramBitExt && Config.sdramWordExt) {
+      // 4颗粒: two bit-extension pairs in dual-channel word-extension
+      val sdram0 = Module(new sdramChisel32)
+      val sdram1 = Module(new sdramChisel32)
+      sdram0.io <> masic.sdram
+      sdram1.io <> masic.sdram1.get
+    } else if (Config.sdramBitExt) {
+      // 2颗粒: single-channel bit-extension (32-bit data)
+      val sdram = Module(new sdramChisel32)
+      sdram.io <> masic.sdram
+    } else {
+      // 1颗粒: no extension (16-bit data)
+      val sdram = Module(new sdramChisel)
+      sdram.io <> masic.sdram
+    }
 
     val externalPins = IO(new Bundle{
       val gpio = chiselTypeOf(masic.gpio)

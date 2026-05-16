@@ -91,7 +91,7 @@ class AXI4ToAPB(val aFlow: Boolean = true)(implicit p: Parameters) extends LazyM
       // sub-word loads.  Other APB slaves (UART, GPIO, etc.) use byte-aligned
       // register addressing and must NOT be shifted.
       val is_psram = araddr_reg >= 0x80000000L.U && araddr_reg < 0x80400000L.U
-      val is_sdram = araddr_reg >= 0xa0000000L.U && araddr_reg < 0xa2000000L.U
+      val is_sdram = araddr_reg >= 0xa0000000L.U && araddr_reg < 0xa8000000L.U
       val need_shift = is_psram || is_sdram
       r.bits.data := Fill(2, Mux(need_shift, rdata_raw >> Cat(araddr_reg(1,0), 0.U(3.W)), rdata_raw))
       r.bits.id   := rid_reg
