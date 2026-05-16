@@ -87,9 +87,13 @@ class AXI4ToAPB(val aFlow: Boolean = true)(implicit p: Parameters) extends LazyM
       val resp_hold = resp holdUnless (state === s_inflight)
       r.valid  := !is_write && (((state === s_inflight) && out.pready) || (state === s_wait_rready_bready))
       val rdata_raw = out.prdata holdUnless (state === s_inflight)
-      // PSRAM returns word-aligned data; shift to align the requested byte to LSB
+      // SDRAM and PSRAM return word-aligned data; shift to LSB-align for
+      // sub-word loads.  Other APB slaves (UART, GPIO, etc.) use byte-aligned
+      // register addressing and must NOT be shifted.
       val is_psram = araddr_reg >= 0x80000000L.U && araddr_reg < 0x80400000L.U
-      r.bits.data := Fill(2, Mux(is_psram, rdata_raw >> Cat(araddr_reg(1,0), 0.U(3.W)), rdata_raw))
+      val is_sdram = araddr_reg >= 0xa0000000L.U && araddr_reg < 0xa2000000L.U
+      val need_shift = is_psram || is_sdram
+      r.bits.data := Fill(2, Mux(need_shift, rdata_raw >> Cat(araddr_reg(1,0), 0.U(3.W)), rdata_raw))
       r.bits.id   := rid_reg
       r.bits.resp := resp_hold
       r.bits.last := true.B
