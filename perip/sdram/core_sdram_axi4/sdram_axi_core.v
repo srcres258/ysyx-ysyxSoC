@@ -132,7 +132,10 @@ wire [ 31:0]  ram_write_data_w = inport_write_data_i;
 wire [ 31:0]  ram_read_data_w;
 wire          ram_ack_w;
 
-wire          ram_req_w = (ram_wr_w != 4'b0) | ram_rd_w;
+wire [31:0] rwdr;wire [3:0] rpsr;
+assign rwdr=(ram_addr_w[1:0]==2'd0)?ram_write_data_w:(ram_addr_w[1:0]==2'd1)?{ram_write_data_w[23:0],8'b0}:(ram_addr_w[1:0]==2'd2)?{ram_write_data_w[15:0],16'b0}:{ram_write_data_w[7:0],24'b0};
+assign rpsr=(ram_addr_w[1:0]==2'd0)?ram_wr_w:(ram_addr_w[1:0]==2'd1)?{ram_wr_w[2:0],ram_wr_w[3]}:(ram_addr_w[1:0]==2'd2)?{ram_wr_w[1:0],ram_wr_w[3:2]}:{ram_wr_w[0],ram_wr_w[3:1]};
+wire ram_req_w=(ram_wr_w!=4'b0)|ram_rd_w;
 
 assign inport_ack_o       = ram_ack_w;
 assign inport_read_data_o = ram_read_data_w;
@@ -500,16 +503,10 @@ else
 begin
     case (state_q)
     //-----------------------------------------
-    // STATE_IDLE / Default (delays)
-    //-----------------------------------------
+    STATE_DELAY:
+    begin command_q<=CMD_NOP;data_rd_en_q<=1'b1;end
     default:
-    begin
-        // Default
-        command_q    <= CMD_NOP;
-        addr_q       <= {SDRAM_ROW_W{1'b0}};
-        bank_q       <= {SDRAM_BANK_W{1'b0}};
-        data_rd_en_q <= 1'b1;
-    end
+    begin command_q<=CMD_NOP;addr_q<={SDRAM_ROW_W{1'b0}};bank_q<={SDRAM_BANK_W{1'b0}};data_rd_en_q<=1'b1;end
     //-----------------------------------------
     // STATE_INIT
     //-----------------------------------------
@@ -606,9 +603,8 @@ begin
         addr_q[AUTO_PRECHARGE]  <= 1'b0;
 
         // Read mask (all bytes in burst)
-        dqm_q       <= {SDRAM_DQM_W{1'b0}};
+        dqm_q<={SDRAM_DQM_W{1'b0}};data_rd_en_q<=1'b1;
     end
-    //-----------------------------------------
     // STATE_WRITE0
     //-----------------------------------------
     STATE_WRITE0 :
@@ -616,14 +612,12 @@ begin
         command_q       <= CMD_WRITE;
         addr_q          <= addr_col_w;
         bank_q          <= addr_bank_w;
-        data_q          <= ram_write_data_w[15:0];
+        data_q<=rwdr[15:0];
 
         // Disable auto precharge (auto close of row)
         addr_q[AUTO_PRECHARGE]  <= 1'b0;
 
-        // Write mask
-        dqm_q           <= ~ram_wr_w[1:0];
-        dqm_buffer_q    <= ~ram_wr_w[3:2];
+        dqm_q<=~rpsr[1:0];dqm_buffer_q<=~rpsr[3:2];
 
         data_rd_en_q    <= 1'b0;
     end
@@ -667,12 +661,25 @@ always @ (posedge clk_i or posedge rst_i)
 if (rst_i)
     data_buffer_q <= 16'b0;
 else if (state_q == STATE_WRITE0)
-    data_buffer_q <= ram_write_data_w[31:16];
+    data_buffer_q<=rwdr[31:16];
 else if (rd_q[SDRAM_READ_LATENCY+1])
     data_buffer_q <= sample_data_q;
 
 // Read data output
-assign ram_read_data_w = {sample_data_q, data_buffer_q};
+// Use sample_data0_q (single-registered) instead of data_buffer_q
+// for the high 16 bits to fix a one-cycle timing skew between
+// data capture and APB pready assertion.
+//
+// Latch the read data at rd_q[3] to prevent the NBA race where
+// sample registers shift one more time before APB captures.
+reg [31:0] read_data_hold_q;
+always @ (posedge clk_i or posedge rst_i)
+if (rst_i)
+    read_data_hold_q <= 32'b0;
+else if (rd_q[SDRAM_READ_LATENCY+1])
+    read_data_hold_q <= {sample_data0_q, sample_data_q};
+
+assign ram_read_data_w = read_data_hold_q;
 
 //-----------------------------------------------------------------
 // ACK

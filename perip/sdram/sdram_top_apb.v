@@ -21,7 +21,8 @@ module sdram_top_apb (
   output [12:0] sdram_a,
   output [ 1:0] sdram_ba,
   output [ 1:0] sdram_dqm,
-  inout  [15:0] sdram_dq
+  inout  [15:0] sdram_dq,
+  input  [15:0] sdram_dataOut
 );
 
   wire sdram_dout_en;
@@ -72,7 +73,7 @@ module sdram_top_apb (
     .sdram_dqm_o(sdram_dqm),
     .sdram_addr_o(sdram_a),
     .sdram_ba_o(sdram_ba),
-    .sdram_data_input_i(sdram_dq),
+    .sdram_data_input_i(sdram_dout_en ? sdram_dq : sdram_dataOut),
     .sdram_data_output_o(sdram_dout),
     .sdram_data_out_en_o(sdram_dout_en)
   );
