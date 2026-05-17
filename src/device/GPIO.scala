@@ -36,8 +36,32 @@ class gpioChisel extends Module {
   val ledReg = RegInit(0.U(16.W))
 
   // 7段数码管段选寄存器 (偏移 0x8) — 32-bit, 复位值 0
-  // 每 4-bit 控制一个数码管的低 4 段 (可扩展)
+  // 每 4-bit 控制一个数码管的显示值 (0-F)
   val segReg = RegInit(0.U(32.W))
+
+  // ========================
+  // BCD (4-bit hex) 到 7 段 (8-bit) 译码表
+  // ========================
+  // NVBoard 段选位序: [7:A, 6:B, 5:C, 4:D, 3:E, 2:F, 1:G, 0:DP]
+  // 高电平有效: 1 = 段亮
+  val segTable = VecInit(Seq(
+    "b11111100".U(8.W),  // 0: ABCDEF
+    "b01100000".U(8.W),  // 1: BC
+    "b11011010".U(8.W),  // 2: ABDEG
+    "b11110010".U(8.W),  // 3: ABCDG
+    "b01100110".U(8.W),  // 4: BCGF
+    "b10110110".U(8.W),  // 5: ACDGF
+    "b10111110".U(8.W),  // 6: ACDEFG
+    "b11100000".U(8.W),  // 7: ABC
+    "b11111110".U(8.W),  // 8: ABCDEFG
+    "b11110110".U(8.W),  // 9: ABCDFG
+    "b11101110".U(8.W),  // A: ABCEFG
+    "b00111110".U(8.W),  // b: CDEFG
+    "b10011100".U(8.W),  // C: ADEF
+    "b01111010".U(8.W),  // d: BCDEG
+    "b10011110".U(8.W),  // E: ADEFG
+    "b10001110".U(8.W)   // F: AEFG
+  ))
 
   // ========================
   // APB 地址译码 — 取低 4 位作偏移
@@ -83,9 +107,10 @@ class gpioChisel extends Module {
   // LED — 由寄存器直接驱动
   io.gpio.out := ledReg
 
-  // 数码管 — segReg 按 4-bit 分组映射到 8 个数码管
+  // 数码管 — segReg 按 4-bit 分组, 经译码表转换为 8-bit 段码
   for (i <- 0 until 8) {
-    io.gpio.seg(i) := segReg(i * 4 + 3, i * 4)
+    val hexVal = segReg(i * 4 + 3, i * 4)
+    io.gpio.seg(i) := segTable(hexVal)
   }
 }
 
