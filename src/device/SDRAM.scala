@@ -390,8 +390,13 @@ object SDRAMAddr {
   def addressSets: Seq[AddressSet] = {
     val channelSize = if (Config.sdramBitExt) 0x4000000L else 0x2000000L // 64MB or 32MB
     val channelCount = if (Config.sdramBitExt && Config.sdramWordExt) 2 else 1
-    (0 until channelCount).flatMap { ch =>
-      AddressSet.misaligned(SDRAM_BASE + ch * channelSize, channelSize)
+    // Use explicit AddressSet(base, mask) to guarantee non-overlapping
+    // regions.  Diplomacy convention: mask=1 bits are "don't care",
+    // mask=0 bits must match.  mask = channelSize-1 ignores the low
+    // address bits that vary within a channel, forcing the high bits
+    // (including the channel-select bit) to match the base address.
+    (0 until channelCount).map { ch =>
+      AddressSet(SDRAM_BASE + ch * channelSize, channelSize - 1)
     }
   }
 }
