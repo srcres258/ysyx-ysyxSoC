@@ -76,8 +76,14 @@ class AXI4ToAPB(val aFlow: Boolean = true)(implicit p: Parameters) extends LazyM
       out.pwrite  := is_write
       out.paddr   := Mux(is_write, awaddr_reg, araddr_reg)
       out.pprot   := APBParameters.PROT_DEFAULT
-      out.pwdata  := wdata_reg
-      out.pstrb   := Mux(is_write, wstrb_reg, 0.U)
+      // SDRAM and PSRAM need byte-lane shifting for both
+      // reads and writes.  See the read-side comment below.
+      val is_psram_w = awaddr_reg >= 0x80000000L.U && awaddr_reg < 0x80400000L.U
+      val is_sdram_w = awaddr_reg >= 0xa0000000L.U && awaddr_reg < 0xa8000000L.U
+      val need_shift_w = is_psram_w || is_sdram_w
+      val wshift = Cat(awaddr_reg(1,0), 0.U(3.W))
+      out.pwdata  := Mux(is_write && need_shift_w, wdata_reg << wshift, wdata_reg)
+      out.pstrb   := Mux(is_write && need_shift_w, (wstrb_reg << awaddr_reg(1,0)), Mux(is_write, wstrb_reg, 0.U))
 
       ar.ready := accept_read
       w.ready  := accept_write
