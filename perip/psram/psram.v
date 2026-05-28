@@ -1,4 +1,5 @@
 `timescale 1ns/1ps
+
 /** IS66WVS4M8ALL PSRAM 行为模型
  *
  * 修复:
@@ -94,7 +95,8 @@ module psram #(
           end
           else begin
             // SPI mode: capture command MSB
-            command <= {7'h0, dio[0]}; cmd_cnt <= 1; state <= S_CMD;
+            command <= {7'h0, dio[0]};
+            cmd_cnt <= 1; state <= S_CMD;
           end
         end
         S_CMD: begin
@@ -104,15 +106,23 @@ module psram #(
             if (cmd_cnt == CMD_QPI_CYCLES - 1) begin
               // 相位补偿: S_IDLE 捕获的是 CMD_LO (bit[3:0]),
               // 因此只匹配 command[7:4] (= CMD_LO nibble) 来识别命令.
-              if (command[7:4] == CMD_F5H[3:0] || command[7:4] == CMD_F5_SHIFTED[3:0]) begin
+              if (
+                command[7:4] == CMD_F5H[3:0] ||
+                command[7:4] == CMD_F5_SHIFTED[3:0]
+              ) begin
                 qpi_mode <= 0; state <= S_IDLE;
               end
-              else if (command[7:4] == CMD_EBH[3:0] || command[7:4] == CMD_EB_SHIFTED[3:0] ||
-                           command[7:4] == CMD_38H[3:0] || command[7:4] == CMD_38_SHIFTED[3:0]) begin
+              else if (
+                command[7:4] == CMD_EBH[3:0] ||
+                command[7:4] == CMD_EB_SHIFTED[3:0] ||
+                command[7:4] == CMD_38H[3:0] ||
+                command[7:4] == CMD_38_SHIFTED[3:0]
+              ) begin
                 addr_cnt <= 0; state <= S_ADDR;
               end
-              else
+              else begin
                 state <= S_IDLE;
+              end
             end
             else begin
               cmd_cnt <= cmd_cnt + 1;
@@ -122,7 +132,10 @@ module psram #(
             // SPI mode: capture command 1 bit at a time
             command <= {command[6:0], dio[0]};
             if (cmd_cnt == CMD_CYCLES - 1) begin
-              if ({command[6:0], dio[0]} == CMD_35H || {command[6:0], dio[0]} == CMD_35_SHIFTED) begin
+              if (
+                {command[6:0], dio[0]} == CMD_35H ||
+                {command[6:0], dio[0]} == CMD_35_SHIFTED
+              ) begin
                 qpi_mode <= 1; state <= S_IDLE;
               end
               else begin
@@ -144,10 +157,16 @@ module psram #(
           if (addr_cnt == ADDR_CYCLES - 1) begin
             if (qpi_mode) begin
               // QPI 模式: 仅匹配 command[7:4] (S_IDLE 捕获的 CMD_LO nibble)
-              if (command[7:4] == CMD_EBH[3:0] || command[7:4] == CMD_EB_SHIFTED[3:0]) begin
+              if (
+                command[7:4] == CMD_EBH[3:0] ||
+                command[7:4] == CMD_EB_SHIFTED[3:0]
+              ) begin
                 dummy_cnt <= 0; state <= S_DUMMY;
               end
-              else if (command[7:4] == CMD_38H[3:0] || command[7:4] == CMD_38_SHIFTED[3:0]) begin
+              else if (
+                command[7:4] == CMD_38H[3:0] ||
+                command[7:4] == CMD_38_SHIFTED[3:0]
+              ) begin
                 // QPI 写: 在转换周期同时捕获第一个写数据 nibble (D7:4)
                 memory[eff_addr][4] <= dio[0];
                 memory[eff_addr][5] <= dio[1];
@@ -159,21 +178,23 @@ module psram #(
               else
                 state <= S_IDLE;
             end
-          else begin
-            if (command == CMD_EBH || command == CMD_EB_SHIFTED) begin
-              dummy_cnt <= 0; state <= S_DUMMY;
-            end
-            else if (command == CMD_38H || command == CMD_38_SHIFTED) begin
-              // 关键: 在转换周期同时捕获第一个写数据 nibble (D7:4)
-              // 以避免因过渡周期导致数据错位 (nibble swap)
-              memory[eff_addr][4] <= dio[0];
-              memory[eff_addr][5] <= dio[1];
-              memory[eff_addr][6] <= dio[2];
-              memory[eff_addr][7] <= dio[3];
-              data_cnt <= 1;   // 已捕获 upper nibble
-              state    <= S_DATA_IN;
-            end
-            else state <= S_IDLE;
+            else begin
+              if (command == CMD_EBH || command == CMD_EB_SHIFTED) begin
+                dummy_cnt <= 0; state <= S_DUMMY;
+              end
+              else if (command == CMD_38H || command == CMD_38_SHIFTED) begin
+                // 关键: 在转换周期同时捕获第一个写数据 nibble (D7:4)
+                // 以避免因过渡周期导致数据错位 (nibble swap)
+                memory[eff_addr][4] <= dio[0];
+                memory[eff_addr][5] <= dio[1];
+                memory[eff_addr][6] <= dio[2];
+                memory[eff_addr][7] <= dio[3];
+                data_cnt <= 1;   // 已捕获 upper nibble
+                state    <= S_DATA_IN;
+              end
+              else begin
+                state <= S_IDLE;
+              end
             end
           end
           else begin
@@ -183,18 +204,23 @@ module psram #(
         S_DUMMY: begin
           if (dummy_cnt == DUMMY_CYCLES - 1) begin
             if (qpi_mode) begin
-              if (command[7:4] == CMD_EBH[3:0] || command[7:4] == CMD_EB_SHIFTED[3:0]) begin
+              if (
+                command[7:4] == CMD_EBH[3:0] ||
+                command[7:4] == CMD_EB_SHIFTED[3:0]
+              ) begin
                 data_cnt <= 0; io_oe <= 1; state <= S_DATA_OUT;
               end
-              else
+              else begin
                 state <= S_IDLE;
+              end
             end
             else begin
               if (command == CMD_EBH || command == CMD_EB_SHIFTED) begin
                 data_cnt <= 0; io_oe <= 1; state <= S_DATA_OUT;
               end
-              else
+              else begin
                 state <= S_IDLE;
+              end
             end
           end else dummy_cnt <= dummy_cnt + 1;
         end
