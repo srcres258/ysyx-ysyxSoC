@@ -76,14 +76,37 @@ class AXI4ToAPB(val aFlow: Boolean = true)(implicit p: Parameters) extends LazyM
       out.pwrite  := is_write
       out.paddr   := Mux(is_write, awaddr_reg, araddr_reg)
       out.pprot   := APBParameters.PROT_DEFAULT
-      // SDRAM and PSRAM need byte-lane shifting for both
-      // reads and writes.  See the read-side comment below.
+      // CPU now sends byte-aligned data/strobe on the correct AXI4 byte lanes.
+      //   - PSRAM/SDRAM: target uses multi-byte APB with pstrb; pass through as-is.
+      //   - UART/GPIO/etc (peripheral): target only reads pwdata[7:0]; shift right
+      //     to bring the active byte back to lane 0, and force pstrb to 0b0001.
       val is_psram_w = awaddr_reg >= 0x80000000L.U && awaddr_reg < 0x80400000L.U
       val is_sdram_w = awaddr_reg >= 0xa0000000L.U && awaddr_reg < 0xa8000000L.U
-      val need_shift_w = is_psram_w || is_sdram_w
+      val is_mem_w    = is_psram_w || is_sdram_w
+      val is_periph_w = !is_psram_w && !is_sdram_w
       val wshift = Cat(awaddr_reg(1,0), 0.U(3.W))
-      out.pwdata  := Mux(is_write && need_shift_w, wdata_reg << wshift, wdata_reg)
-      out.pstrb   := Mux(is_write && need_shift_w, (wstrb_reg << awaddr_reg(1,0)), Mux(is_write, wstrb_reg, 0.U))
+      out.pwdata := Mux(
+        is_write,
+        Mux(
+          // PSRAM/SDRAM: CPU pre-aligned, pass through
+          is_mem_w,
+          wdata_reg,                        
+          // peripheral: shift down to lane 0
+          Mux(is_periph_w, wdata_reg >> wshift, 0.U)
+        ),
+        0.U
+      )
+      out.pstrb := Mux(
+        is_write,
+        Mux(
+          // PSRAM/SDRAM: pass through
+          is_mem_w,
+          wstrb_reg,                    
+          // peripheral: lane 0 only
+          Mux(is_periph_w, 0b0001.U, 0.U)
+        ),              
+        0.U
+      )
 
       ar.ready := accept_read
       w.ready  := accept_write
@@ -93,13 +116,27 @@ class AXI4ToAPB(val aFlow: Boolean = true)(implicit p: Parameters) extends LazyM
       val resp_hold = resp holdUnless (state === s_inflight)
       r.valid  := !is_write && (((state === s_inflight) && out.pready) || (state === s_wait_rready_bready))
       val rdata_raw = out.prdata holdUnless (state === s_inflight)
-      // SDRAM and PSRAM return word-aligned data; shift to LSB-align for
-      // sub-word loads.  Other APB slaves (UART, GPIO, etc.) use byte-aligned
-      // register addressing and must NOT be shifted.
-      val is_psram = araddr_reg >= 0x80000000L.U && araddr_reg < 0x80400000L.U
-      val is_sdram = araddr_reg >= 0xa0000000L.U && araddr_reg < 0xa8000000L.U
-      val need_shift = is_psram || is_sdram
-      r.bits.data := Fill(2, Mux(need_shift, rdata_raw >> Cat(araddr_reg(1,0), 0.U(3.W)), rdata_raw))
+      // CPU MEMUnit right-shifts rdata by addr*8 before extracting
+      // sub-word lanes (expects data in the AXI4-standard byte lane).
+      //   - PSRAM/SDRAM: word-aligned targets, data already at natural byte
+      //     positions → pass through.
+      //   - FLASH/UART/etc: APB targets return the byte in prdata[7:0]
+      //     regardless of address offset → shift LEFT by addr*8 to the
+      //     correct AXI4 byte lane.
+      val is_psram     = araddr_reg >= 0x80000000L.U && araddr_reg < 0x80400000L.U
+      val is_sdram     = araddr_reg >= 0xa0000000L.U && araddr_reg < 0xa8000000L.U
+      val is_periph    = !is_psram && !is_sdram
+      val rshift       = Cat(araddr_reg(1,0), 0.U(3.W))
+      r.bits.data := Fill(
+        2,
+        Mux(
+          // FLASH/UART: shift left to byte lane
+          is_periph,
+          rdata_raw << rshift,   
+          // PSRAM/SDRAM: pass through
+          Mux(is_psram || is_sdram, rdata_raw, rdata_raw)
+        )
+      )
       r.bits.id   := rid_reg
       r.bits.resp := resp_hold
       r.bits.last := true.B
