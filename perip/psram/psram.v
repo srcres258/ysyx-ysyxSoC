@@ -104,20 +104,15 @@ module psram #(
             // QPI mode: capture lower nibble (command[3:0])
             command[3:0] <= dio;
             if (cmd_cnt == CMD_QPI_CYCLES - 1) begin
-              // 相位补偿: S_IDLE 捕获的是 CMD_LO (bit[3:0]),
-              // 因此只匹配 command[7:4] (= CMD_LO nibble) 来识别命令.
-              if (
-                command[7:4] == CMD_F5H[3:0] ||
-                command[7:4] == CMD_F5_SHIFTED[3:0]
-              ) begin
+              // QPI mode: compare the captured CMD_LO nibble.
+              if (command[7:4] == CMD_F5H[3:0] ||
+                  command[7:4] == CMD_F5_SHIFTED[3:0]) begin
                 qpi_mode <= 0; state <= S_IDLE;
               end
-              else if (
-                command[7:4] == CMD_EBH[3:0] ||
-                command[7:4] == CMD_EB_SHIFTED[3:0] ||
-                command[7:4] == CMD_38H[3:0] ||
-                command[7:4] == CMD_38_SHIFTED[3:0]
-              ) begin
+              else if (command[7:4] == CMD_EBH[3:0] ||
+                       command[7:4] == CMD_EB_SHIFTED[3:0] ||
+                       command[7:4] == CMD_38H[3:0] ||
+                       command[7:4] == CMD_38_SHIFTED[3:0]) begin
                 addr_cnt <= 0; state <= S_ADDR;
               end
               else begin
@@ -156,17 +151,13 @@ module psram #(
           end
           if (addr_cnt == ADDR_CYCLES - 1) begin
             if (qpi_mode) begin
-              // QPI 模式: 仅匹配 command[7:4] (S_IDLE 捕获的 CMD_LO nibble)
-              if (
-                command[7:4] == CMD_EBH[3:0] ||
-                command[7:4] == CMD_EB_SHIFTED[3:0]
-              ) begin
+              // QPI mode: use the captured CMD_LO nibble.
+              if (command[7:4] == CMD_EBH[3:0] ||
+                  command[7:4] == CMD_EB_SHIFTED[3:0]) begin
                 dummy_cnt <= 0; state <= S_DUMMY;
               end
-              else if (
-                command[7:4] == CMD_38H[3:0] ||
-                command[7:4] == CMD_38_SHIFTED[3:0]
-              ) begin
+              else if (command[7:4] == CMD_38H[3:0] ||
+                       command[7:4] == CMD_38_SHIFTED[3:0]) begin
                 // QPI 写: 在转换周期同时捕获第一个写数据 nibble (D7:4)
                 memory[eff_addr][4] <= dio[0];
                 memory[eff_addr][5] <= dio[1];
@@ -204,11 +195,11 @@ module psram #(
         S_DUMMY: begin
           if (dummy_cnt == DUMMY_CYCLES - 1) begin
             if (qpi_mode) begin
-              if (
-                command[7:4] == CMD_EBH[3:0] ||
-                command[7:4] == CMD_EB_SHIFTED[3:0]
-              ) begin
-                data_cnt <= 0; io_oe <= 1; state <= S_DATA_OUT;
+              if (command[7:4] == CMD_EBH[3:0] ||
+                  command[7:4] == CMD_EB_SHIFTED[3:0]) begin
+                io_oe <= 1;
+                data_cnt <= 0;
+                state <= S_DATA_OUT;
               end
               else begin
                 state <= S_IDLE;

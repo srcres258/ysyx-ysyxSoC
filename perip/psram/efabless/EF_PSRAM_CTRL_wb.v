@@ -111,6 +111,11 @@ module EF_PSRAM_CTRL_wb (
 
     // ---- QPI Initialization: send Enter QPI command (0x35) via SPI ----
     wire [7:0] CMD_QPI_ENTER = 8'h35;
+    wire [2:0] qpi_init_bit_idx = (qpi_init_cnt < 8) ? (3'd7 - qpi_init_cnt[2:0]) : 3'd0;
+    wire [3:0] qpi_init_dout = (qpi_init_cnt < 8)
+        ? {3'b0, CMD_QPI_ENTER[qpi_init_bit_idx]}
+        : 4'b0000;
+    wire [3:0] qpi_init_douten = (qpi_init_cnt < 8) ? 4'b1111 : 4'b0000;
     always @ (posedge clk_i or posedge rst_i) begin
         if(rst_i) begin
             qpi_init_cnt  <= 0;
@@ -141,8 +146,6 @@ module EF_PSRAM_CTRL_wb (
         end
     end
 
-    // Init dout: 0x35 MSB first on dio[0] only (SPI protocol)
-    wire [3:0] qpi_init_dout = {3'b0, CMD_QPI_ENTER[7 - qpi_init_cnt]};
     wire qpi_init_active = (state == ST_QPI_INIT && !qpi_init_done);
 
     wire [2:0]  size =  (sel_i == 4'b0001) ? 1 :
@@ -220,7 +223,7 @@ module EF_PSRAM_CTRL_wb (
     assign sck  = qpi_init_active ? qpi_init_sck : (wb_we ? mw_sck  : mr_sck);
     assign ce_n = qpi_init_active ? 1'b0         : (wb_we ? mw_ce_n : mr_ce_n);
     assign dout = qpi_init_active ? qpi_init_dout : (wb_we ? mw_dout : mr_dout);
-    assign douten  = qpi_init_active ? 4'b1111 : (wb_we ? {4{mw_doe}}  : {4{mr_doe}});
+    assign douten  = qpi_init_active ? qpi_init_douten : (wb_we ? {4{mw_doe}}  : {4{mr_doe}});
 
     assign mw_din = din;
     assign mr_din = din;
