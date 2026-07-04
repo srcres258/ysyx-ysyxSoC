@@ -38,12 +38,12 @@ module psram #(
 
   localparam CMD_EB_SHIFTED = 8'hD6;
   localparam CMD_38_SHIFTED = 8'h70;
-  localparam CMD_EBH         = 8'hEB;  // Quad IO Read
-  localparam CMD_38H         = 8'h38;  // Quad IO Write
-  localparam CMD_35H         = 8'h35;  // Enter QPI mode
-  localparam CMD_35_SHIFTED  = 8'h6A;  // 0x35 << 1 (phase shift)
-  localparam CMD_F5H         = 8'hF5;  // Exit QPI mode
-  localparam CMD_F5_SHIFTED  = 8'hEA;  // 0xF5 << 1 (phase shift)
+  localparam CMD_EBH        = 8'hEB;  // Quad IO Read
+  localparam CMD_38H        = 8'h38;  // Quad IO Write
+  localparam CMD_35H        = 8'h35;  // Enter QPI mode
+  localparam CMD_35_SHIFTED = 8'h6A;  // 0x35 << 1 (phase shift)
+  localparam CMD_F5H        = 8'hF5;  // Exit QPI mode
+  localparam CMD_F5_SHIFTED = 8'hEA;  // 0xF5 << 1 (phase shift)
 
   reg                 qpi_mode;       // 0=SPI/QSPI, 1=QPI (4-4-4)
   reg [7:0]           memory [0:MEM_SIZE-1];
@@ -105,14 +105,18 @@ module psram #(
             command[3:0] <= dio;
             if (cmd_cnt == CMD_QPI_CYCLES - 1) begin
               // QPI mode: compare the captured CMD_LO nibble.
-              if (command[7:4] == CMD_F5H[3:0] ||
-                  command[7:4] == CMD_F5_SHIFTED[3:0]) begin
+              if (
+                command[7:4] == CMD_F5H[3:0] ||
+                command[7:4] == CMD_F5_SHIFTED[3:0]
+              ) begin
                 qpi_mode <= 0; state <= S_IDLE;
               end
-              else if (command[7:4] == CMD_EBH[3:0] ||
-                       command[7:4] == CMD_EB_SHIFTED[3:0] ||
-                       command[7:4] == CMD_38H[3:0] ||
-                       command[7:4] == CMD_38_SHIFTED[3:0]) begin
+              else if (
+                command[7:4] == CMD_EBH[3:0] ||
+                command[7:4] == CMD_EB_SHIFTED[3:0] ||
+                command[7:4] == CMD_38H[3:0] ||
+                command[7:4] == CMD_38_SHIFTED[3:0]
+              ) begin
                 addr_cnt <= 0; state <= S_ADDR;
               end
               else begin
@@ -152,12 +156,16 @@ module psram #(
           if (addr_cnt == ADDR_CYCLES - 1) begin
             if (qpi_mode) begin
               // QPI mode: use the captured CMD_LO nibble.
-              if (command[7:4] == CMD_EBH[3:0] ||
-                  command[7:4] == CMD_EB_SHIFTED[3:0]) begin
+              if (
+                command[7:4] == CMD_EBH[3:0] ||
+                command[7:4] == CMD_EB_SHIFTED[3:0]
+              ) begin
                 dummy_cnt <= 0; state <= S_DUMMY;
               end
-              else if (command[7:4] == CMD_38H[3:0] ||
-                       command[7:4] == CMD_38_SHIFTED[3:0]) begin
+              else if (
+                command[7:4] == CMD_38H[3:0] ||
+                command[7:4] == CMD_38_SHIFTED[3:0]
+              ) begin
                 // QPI 写: 在转换周期同时捕获第一个写数据 nibble (D7:4)
                 memory[eff_addr][4] <= dio[0];
                 memory[eff_addr][5] <= dio[1];
@@ -195,8 +203,10 @@ module psram #(
         S_DUMMY: begin
           if (dummy_cnt == DUMMY_CYCLES - 1) begin
             if (qpi_mode) begin
-              if (command[7:4] == CMD_EBH[3:0] ||
-                  command[7:4] == CMD_EB_SHIFTED[3:0]) begin
+              if (
+                command[7:4] == CMD_EBH[3:0] ||
+                command[7:4] == CMD_EB_SHIFTED[3:0]
+              ) begin
                 io_oe <= 1;
                 data_cnt <= 0;
                 state <= S_DATA_OUT;
@@ -240,7 +250,9 @@ module psram #(
             data_cnt <= data_cnt + 1;
           end
         end
-        default: state <= S_IDLE;
+        default: begin
+          state <= S_IDLE;
+        end
       endcase
     end
   end
@@ -254,5 +266,5 @@ module psram #(
       io_out[3] <= data_cnt[0] ? memory_data[3] : memory_data[7];
     end
   end
-
 endmodule
+
