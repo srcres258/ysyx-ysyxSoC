@@ -82,12 +82,20 @@ module psram #(
   // ---- 主状态机: negedge sck (命令/地址/写数据捕获, 状态转换) ----
   always @(negedge sck or posedge ce_n) begin
     if (ce_n) begin
-      state <= S_IDLE; io_oe <= 0; command <= 0; address <= 0;
-      cmd_cnt <= 0; addr_cnt <= 0; dummy_cnt <= 0; data_cnt <= 0;
+      // ce_n 激活意味着状态机不工作. 保持 initial state 避免 undefined behaviour.
+      state <= S_IDLE;
+      io_oe <= 0;
+      command <= 0;
+      address <= 0;
+      cmd_cnt <= 0;
+      addr_cnt <= 0;
+      dummy_cnt <= 0;
+      data_cnt <= 0;
     end
     else begin
       case (state)
         S_IDLE: begin
+          // IDLE 状态: 开始接收命令, 并立即转到 CMD 状态.
           if (qpi_mode) begin
             // QPI mode: capture upper nibble (command[7:4])
             command[7:4] <= dio;
@@ -100,6 +108,7 @@ module psram #(
           end
         end
         S_CMD: begin
+          // CMD 状态: 把命令接收完整. 接收完成后, 判断命令类型, 执行命令对应的任务.
           if (qpi_mode) begin
             // QPI mode: capture lower nibble (command[3:0])
             command[3:0] <= dio;
@@ -109,6 +118,7 @@ module psram #(
                 command[7:4] == CMD_F5H[3:0] ||
                 command[7:4] == CMD_F5_SHIFTED[3:0]
               ) begin
+                // QPI Mode Exit, F5h
                 qpi_mode <= 0; state <= S_IDLE;
               end
               else if (
@@ -117,9 +127,11 @@ module psram #(
                 command[7:4] == CMD_38H[3:0] ||
                 command[7:4] == CMD_38_SHIFTED[3:0]
               ) begin
+                // 进入 ADDR state 开始接收地址数据.
                 addr_cnt <= 0; state <= S_ADDR;
               end
               else begin
+                // unknown command, 返回 IDLE state.
                 state <= S_IDLE;
               end
             end
@@ -135,9 +147,11 @@ module psram #(
                 {command[6:0], dio[0]} == CMD_35H ||
                 {command[6:0], dio[0]} == CMD_35_SHIFTED
               ) begin
+                // QPI Mode Enable, 0x35
                 qpi_mode <= 1; state <= S_IDLE;
               end
               else begin
+                // otherwise, 进入 ADDR state 开始接收地址数据.
                 addr_cnt <= 0; state <= S_ADDR;
               end
             end

@@ -65,7 +65,6 @@ module EF_PSRAM_CTRL_wb (
     reg         qpi_mode;           // 0=SPI, 1=QPI active (set after init)
     reg         qpi_init_done;      // init sequence completed
     reg  [3:0]  qpi_init_cnt;       // sck posedge counter for init command
-    reg  [3:0]  qpi_init_wait;      // wait counter after command
     reg         qpi_init_sck;       // sck during init sequence
 
     //wire        doe;
@@ -119,7 +118,6 @@ module EF_PSRAM_CTRL_wb (
     always @ (posedge clk_i or posedge rst_i) begin
         if(rst_i) begin
             qpi_init_cnt  <= 0;
-            qpi_init_wait <= 0;
             qpi_init_sck  <= 0;
             qpi_mode      <= 0;
             qpi_init_done <= 0;
@@ -128,18 +126,11 @@ module EF_PSRAM_CTRL_wb (
             if (!qpi_init_done) begin
                 // Toggle sck every clk_i cycle while ce_n is low (same as reader/writer)
                 qpi_init_sck <= ~qpi_init_sck;
-                if (qpi_init_wait > 0) begin
-                    // Wait phase: keep ce_n low for a few sck cycles, PSRAM processes 0x35
-                    qpi_init_wait <= qpi_init_wait + 1;
-                    if (qpi_init_wait == 4) begin  // wait 4 sck cycles
-                        qpi_mode      <= 1;
-                        qpi_init_done <= 1;
-                    end
-                end
-                else if (qpi_init_sck) begin  // posedge of sck: count command bits
+                if (qpi_init_sck) begin  // posedge of sck: count command bits
                     qpi_init_cnt <= qpi_init_cnt + 1;
                     if (qpi_init_cnt == 7) begin  // after 8 sck pos-edges (8 bits)
-                        qpi_init_wait <= 1;  // start wait phase
+                        qpi_mode      <= 1;
+                        qpi_init_done <= 1;
                     end
                 end
             end
