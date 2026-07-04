@@ -243,7 +243,7 @@ module psram #(
           if (data_cnt == DATA_CYCLES) begin
             io_oe <= 0; state <= S_IDLE;
           end
-          else data_cnt = data_cnt + 1;
+          else data_cnt <= data_cnt + 1;
         end
         S_DATA_IN: begin
           if (data_cnt == DATA_CYCLES)
