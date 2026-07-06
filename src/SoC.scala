@@ -173,17 +173,17 @@ class ysyxSoCFull(implicit p: Parameters) extends LazyModule {
     // SDRAM behavior model — instantiate 1, 2, or 4颗粒 based on Config
     if (Config.sdramBitExt && Config.sdramWordExt) {
       // 4颗粒: two bit-extension pairs in dual-channel word-extension
-      val sdram0 = Module(new sdramChisel32)
-      val sdram1 = Module(new sdramChisel32)
+      val sdram0 = Module(new sdramChisel(laneCount = 2))
+      val sdram1 = Module(new sdramChisel(laneCount = 2))
       sdram0.io <> masic.sdram
       sdram1.io <> masic.sdram1.get
     } else if (Config.sdramBitExt) {
       // 2颗粒: single-channel bit-extension (32-bit data)
-      val sdram = Module(new sdramChisel32)
+      val sdram = Module(new sdramChisel(laneCount = 2))
       sdram.io <> masic.sdram
     } else {
       // 1颗粒: no extension (16-bit data)
-      val sdram = Module(new sdramChisel)
+      val sdram = Module(new sdramChisel(laneCount = 1))
       sdram.io <> masic.sdram
     }
 

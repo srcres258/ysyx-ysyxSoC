@@ -55,318 +55,288 @@ class sdram extends BlackBox {
 }
 
 // ---------------------------------------------------------------------
-// MT48LC16M16A2 SDRAM simulation behavior model (Chisel)
+// Internal MT48LC16M16A2 x16 particle core.
 //
-// Specifications:
-//   4 banks x 8192 rows x 512 cols x 16 bits = 256 Mbit = 32 MB
-//   Internal address: {row[12:0], bank[1:0], col[8:0]} — 24 bits
+// This core models one physical SDRAM particle in the digital domain:
+// - 4 banks × 8192 rows × 512 cols × 16 bits = 32 MB
+// - bank-open state and active-row tracking
+// - LOAD MODE REGISTER / ACTIVE / READ / WRITE / PRECHARGE / AUTO REFRESH
+// - COMMAND INHIBIT and NOP as protocol-visible no-ops
 //
-// Supported commands:
-//   LOAD MODE REGISTER — stores CAS Latency / Burst Length
-//   ACTIVE             — opens a row in the specified bank
-//   READ               — reads from active row (data after CL cycles)
-//   WRITE              — writes to active row (data same cycle as cmd)
-//   PRECHARGE / REFRESH / BURST TERMINATE — treated as NOP
+// PRECHARGE and AUTO REFRESH keep their protocol side effects, but do not
+// model DRAM-cell electrical retention. This matches the ysyx lecture's
+// intended simulation scope while staying command-correct.
 // ---------------------------------------------------------------------
-class sdramChisel extends RawModule {
-  val io = IO(Flipped(new SDRAMIO))
+class SdramParticleCore extends Module {
+  val io = IO(new Bundle {
+    val cke = Input(Bool())
+    val cs  = Input(Bool())
+    val ras = Input(Bool())
+    val cas = Input(Bool())
+    val we  = Input(Bool())
+    val a   = Input(UInt(13.W))
+    val ba  = Input(UInt(2.W))
 
-  // Cross-domain signals (declared at RawModule scope for TriStateInBuf)
-  val memRdata = Wire(UInt(16.W))
-  val rValid   = Wire(Bool())
-  val dqIn     = Wire(UInt(16.W))
+    val dqm       = Input(UInt(2.W))
+    val writeData = Input(UInt(16.W))
 
-  // ===================================================================
-  // Clock domain: io.clk (SDRAM clock = ~system clock)
-  // ===================================================================
-  withClockAndReset(io.clk.asClock, false.B) {
+    val readData  = Output(UInt(16.W))
+    val readDrive = Output(Bool())
+  })
 
-    // ---------------------------------------------------------------
-    // Command decoding: {cs, ras, cas, we} (all active low)
-    // ---------------------------------------------------------------
-    val cmd = Cat(io.cs, io.ras, io.cas, io.we)
+  val cmd = Cat(io.cs, io.ras, io.cas, io.we)
 
-    val CMD_LMR  = "b0000".U(4.W)  // LOAD MODE REGISTER
-    val CMD_AR   = "b0001".U(4.W)  // AUTO REFRESH       -> NOP
-    val CMD_PRE  = "b0010".U(4.W)  // PRECHARGE           -> NOP
-    val CMD_ACT  = "b0011".U(4.W)  // ACTIVE
-    val CMD_WR   = "b0100".U(4.W)  // WRITE
-    val CMD_RD   = "b0101".U(4.W)  // READ
-    val CMD_BT   = "b0110".U(4.W)  // BURST TERMINATE     -> NOP
-    val CMD_NOP  = "b0111".U(4.W)  // NOP
+  val CMD_LMR = "b0000".U(4.W)
+  val CMD_AR  = "b0001".U(4.W)
+  val CMD_PRE = "b0010".U(4.W)
+  val CMD_ACT = "b0011".U(4.W)
+  val CMD_WR  = "b0100".U(4.W)
+  val CMD_RD  = "b0101".U(4.W)
+  val CMD_BT  = "b0110".U(4.W)
+  val CMD_NOP = "b0111".U(4.W)
 
-    val cmdValid = io.cke  // Commands only valid when CKE is high
+  val commandInhibit = io.cke && io.cs
+  val commandAccept  = io.cke && !io.cs
 
-    // ---------------------------------------------------------------
-    // Mode Register
-    //   A[2:0]  — Burst Length  (001=2, 010=4, 011=8)
-    //   A[6:4]  — CAS Latency   (010=2, 011=3)
-    // ---------------------------------------------------------------
-    val modeReg = RegInit(0.U(13.W))
-    when(cmdValid && cmd === CMD_LMR) {
-      modeReg := io.a
-    }
+  val isLmr = commandAccept && cmd === CMD_LMR
+  val isAr  = commandAccept && cmd === CMD_AR
+  val isPre = commandAccept && cmd === CMD_PRE
+  val isAct = commandAccept && cmd === CMD_ACT
+  val isWr  = commandAccept && cmd === CMD_WR
+  val isRd  = commandAccept && cmd === CMD_RD
+  val isBt  = commandAccept && cmd === CMD_BT
+  val isNop = commandAccept && cmd === CMD_NOP
 
-    val burstLen = MuxLookup(modeReg(2, 0), 1.U(4.W))(Seq(
-      0.U  ->  1.U,
-      1.U  ->  2.U,
-      2.U  ->  4.U,
-      3.U  ->  8.U
-    ))
+  val modeReg = RegInit(0.U(13.W))
+  val burstLen = MuxLookup(modeReg(2, 0), 1.U(4.W))(Seq(
+    0.U -> 1.U,
+    1.U -> 2.U,
+    2.U -> 4.U,
+    3.U -> 8.U
+  ))
+  val casLatency = MuxLookup(modeReg(6, 4), 2.U(2.W))(Seq(
+    "b010".U -> 2.U,
+    "b011".U -> 3.U
+  ))
 
-    val casLatency = Mux(modeReg(6, 4) === "b011".U, 3.U, 2.U)
+  val bankOpen = RegInit(VecInit(Seq.fill(4)(false.B)))
+  val openRow  = RegInit(VecInit(Seq.fill(4)(0.U(13.W))))
 
-    // ---------------------------------------------------------------
-    // Bank Row Registers — 4 banks, each stores the active row
-    // ---------------------------------------------------------------
-    val rowReg = SyncReadMem(4, UInt(13.W))
-    val rowRegRdata = rowReg.read(io.ba)
-    when(cmdValid && cmd === CMD_ACT) {
-      rowReg.write(io.ba, io.a)
-    }
+  val allBanksIdle = !bankOpen.asUInt.orR
+  val targetBankOpen = bankOpen(io.ba)
+  val targetRow = openRow(io.ba)
+  val colAddr = io.a(8, 0)
 
-    // ---------------------------------------------------------------
-    // Main memory array — 16M x 16-bit = 32 MB
-    // ---------------------------------------------------------------
-    val memDepth = 1 << 24  // 16,777,216
-    val mem = SyncReadMem(memDepth, Vec(2, UInt(8.W)))
+  def mkAddr(row: UInt, bank: UInt, col: UInt): UInt = Cat(row, bank, col)
 
-    // ===============================================================
-    // Read Pipeline
-    // ===============================================================
-    val rAddr = RegInit(0.U(24.W))
-    val rCnt  = RegInit(0.U(4.W))
+  val memDepth = 1 << 24
+  val mem = SyncReadMem(memDepth, Vec(2, UInt(8.W)))
 
-    when(cmdValid && cmd === CMD_RD) {
-      rAddr := Cat(rowRegRdata, io.ba, io.a(8, 0))
-      rCnt  := burstLen
-    }.elsewhen(rCnt =/= 0.U) {
-      rAddr := rAddr + 1.U
-      rCnt  := rCnt - 1.U
-    }
+  val readAddr      = RegInit(0.U(24.W))
+  val readRemain    = RegInit(0.U(4.W))
+  val readBank      = RegInit(0.U(2.W))
+  val readAutoPre   = RegInit(false.B)
 
-    // Synchronous read memory (1 cycle latency)
-    val rawReadData = mem.read(rAddr)
-    memRdata := Cat(rawReadData(1), rawReadData(0))
+  val writeAddr     = RegInit(0.U(24.W))
+  val writeRemain   = RegInit(0.U(4.W))
+  val writeBank     = RegInit(0.U(2.W))
+  val writeAutoPre  = RegInit(false.B)
 
-    // Read valid delay register — combined with SyncReadMem's 1-cycle
-    // latency to achieve CAS Latency = 2 timing.
-    //   Cycle T:   READ cmd, rCnt <- burstLen
-    //   Cycle T+1: rCnt > 0, issue mem.read(A0), rCnt <- burstLen-1
-    //   Cycle T+2: A0 data ready, rValid = true -> drive DQ
-    //   Cycle T+3: A1 data ready (burst continues)
-    val rValidReg = RegInit(false.B)
-    rValidReg := (rCnt =/= 0.U)
-    rValid := rValidReg
+  val readIssue     = WireDefault(false.B)
+  val readIssueAddr = WireDefault(0.U(24.W))
 
-    // ===============================================================
-    // Write Pipeline
-    // ===============================================================
-    val wAddr = RegInit(0.U(24.W))
-    val wCnt  = RegInit(0.U(4.W))
+  val writeFire     = WireDefault(false.B)
+  val writeFireAddr = WireDefault(0.U(24.W))
+  val writeFireData = WireDefault(0.U(16.W))
+  val writeFireMask = WireDefault(0.U(2.W))
 
-    val we = WireDefault(false.B)
-    val wa = WireDefault(0.U(24.W))
-    val wd = WireDefault(0.U(16.W))
-    val wq = WireDefault(0.U(2.W))
+  when(isLmr) {
+    assert(allBanksIdle, "SDRAM LMR requires all banks idle")
+    assert(io.a(2, 0) <= 3.U, "SDRAM unsupported burst length in mode register")
+    assert(io.a(6, 4) === "b010".U || io.a(6, 4) === "b011".U,
+      "SDRAM unsupported CAS latency in mode register")
+    modeReg := io.a
+  }
 
-    when(cmdValid && cmd === CMD_WR) {
-      // First beat: data present on DQ bus same cycle as WRITE command
-      we    := true.B
-      wa    := Cat(rowRegRdata, io.ba, io.a(8, 0))
-      wd    := dqIn
-      wq    := io.dqm
-      wCnt  := burstLen - 1.U
-      wAddr := Cat(rowRegRdata, io.ba, io.a(8, 0)) + 1.U
-    }.elsewhen(wCnt =/= 0.U) {
-      // Subsequent beats
-      we    := true.B
-      wa    := wAddr
-      wd    := dqIn
-      wq    := io.dqm
-      wCnt  := wCnt - 1.U
-      wAddr := wAddr + 1.U
-    }
+  when(isAct) {
+    assert(!targetBankOpen, "SDRAM ACTIVE to already-open bank")
+    openRow(io.ba) := io.a
+    bankOpen(io.ba) := true.B
+  }
 
-    // Single write port with byte masking
-    when(we) {
-      val ww = Wire(Vec(2, UInt(8.W)))
-      ww(0) := wd(7, 0)    // low byte
-      ww(1) := wd(15, 8)   // high byte
-
-      val mm = Wire(Vec(2, Bool()))
-      // DQM active high: 1 = mask (do not write)
-      // mask = ~dqm  (true = write, false = mask)
-      mm(0) := ~wq(0)
-      mm(1) := ~wq(1)
-
-      mem.write(wa, ww, mm)
+  when(isPre) {
+    when(io.a(10)) {
+      bankOpen.foreach(_ := false.B)
+    }.otherwise {
+      bankOpen(io.ba) := false.B
     }
   }
 
-  // ===================================================================
-  // Tri-state data bus — outside clock domain (combinational)
-  // ===================================================================
-  dqIn := TriStateInBuf(io.dq, memRdata, rValid)
+  when(isAr) {
+    assert(allBanksIdle, "SDRAM AUTO REFRESH requires all banks idle")
+  }
 
-  // Read data bypass — works around Verilator hierarchical tri-state issue
-  io.dataOut := memRdata
+  when(isBt) {
+    readRemain := 0.U
+    writeRemain := 0.U
+    when(readAutoPre)  { bankOpen(readBank)  := false.B }
+    when(writeAutoPre) { bankOpen(writeBank) := false.B }
+    readAutoPre  := false.B
+    writeAutoPre := false.B
+  }
+
+  val readCmdLegal = isRd && targetBankOpen
+  val writeCmdLegal = isWr && targetBankOpen
+
+  when(isRd) {
+    assert(targetBankOpen, "SDRAM READ requires ACTIVE row in target bank")
+  }
+  when(isWr) {
+    assert(targetBankOpen, "SDRAM WRITE requires ACTIVE row in target bank")
+  }
+
+  when(readCmdLegal) {
+    val startAddr = mkAddr(targetRow, io.ba, colAddr)
+    readIssue := true.B
+    readIssueAddr := startAddr
+    readRemain := burstLen - 1.U
+    readAddr := startAddr + 1.U
+    readBank := io.ba
+    readAutoPre := io.a(10)
+    when(burstLen === 1.U && io.a(10)) {
+      bankOpen(io.ba) := false.B
+      readAutoPre := false.B
+    }
+  }.elsewhen(readRemain =/= 0.U) {
+    readIssue := true.B
+    readIssueAddr := readAddr
+    when(readRemain === 1.U) {
+      when(readAutoPre) {
+        bankOpen(readBank) := false.B
+      }
+      readAutoPre := false.B
+    }
+    readRemain := readRemain - 1.U
+    readAddr := readAddr + 1.U
+  }
+
+  when(writeCmdLegal) {
+    val startAddr = mkAddr(targetRow, io.ba, colAddr)
+    writeFire := true.B
+    writeFireAddr := startAddr
+    writeFireData := io.writeData
+    writeFireMask := io.dqm
+    writeRemain := burstLen - 1.U
+    writeAddr := startAddr + 1.U
+    writeBank := io.ba
+    writeAutoPre := io.a(10)
+    when(burstLen === 1.U && io.a(10)) {
+      bankOpen(io.ba) := false.B
+      writeAutoPre := false.B
+    }
+  }.elsewhen(writeRemain =/= 0.U) {
+    writeFire := true.B
+    writeFireAddr := writeAddr
+    writeFireData := io.writeData
+    writeFireMask := io.dqm
+    when(writeRemain === 1.U) {
+      when(writeAutoPre) {
+        bankOpen(writeBank) := false.B
+      }
+      writeAutoPre := false.B
+    }
+    writeRemain := writeRemain - 1.U
+    writeAddr := writeAddr + 1.U
+  }
+
+  when(writeFire) {
+    val writeBytes = Wire(Vec(2, UInt(8.W)))
+    writeBytes(0) := writeFireData(7, 0)
+    writeBytes(1) := writeFireData(15, 8)
+
+    val writeEnable = Wire(Vec(2, Bool()))
+    writeEnable(0) := !writeFireMask(0)
+    writeEnable(1) := !writeFireMask(1)
+    mem.write(writeFireAddr, writeBytes, writeEnable)
+  }
+
+  val rawReadData = mem.read(readIssueAddr, readIssue)
+  val readValidD1 = RegNext(readIssue, false.B)
+  val readValidD2 = RegNext(readValidD1, false.B)
+  val readValidD3 = RegNext(readValidD2, false.B)
+
+  val readDataStage1 = RegInit(0.U(16.W))
+  val readDataStage2 = RegInit(0.U(16.W))
+
+  when(readValidD1) {
+    readDataStage1 := Cat(rawReadData(1), rawReadData(0))
+  }
+  when(readValidD2) {
+    readDataStage2 := readDataStage1
+  }
+
+  io.readData := Mux(casLatency === 3.U, readDataStage2, readDataStage1)
+  io.readDrive := Mux(casLatency === 3.U, readValidD3, readValidD2)
+
+  dontTouch(commandInhibit)
+  dontTouch(isNop)
 }
 
 // ---------------------------------------------------------------------
-// MT48LC16M16A2 SDRAM simulation behavior model — 32-bit wide variant
+// MT48LC16M16A2 SDRAM simulation behavior model (Chisel)
 //
-// This models two MT48LC16M16A2颗粒 in bit-expansion mode:
-//   2顆粒 x 16-bit = 32-bit data bus
-//   Shared control signals, separate DQM[3:0] (2 bits per顆粒)
-//   4 banks x 8192 rows x 512 cols x 32 bits = 512 Mbit = 64 MB
-//   Internal address: {row[12:0], bank[1:0], col[8:0]} — 24 bits
-//
-// With 32-bit data bus, BL=1 (no burst needed for full-width access).
+// laneCount=1 : one x16 particle using the low 16 bits of SDRAMIO.dq
+// laneCount=2 : two x16 particles in bit-extension mode, forming a 32-bit
+//               SDRAM controller channel while preserving per-particle state
 // ---------------------------------------------------------------------
-class sdramChisel32 extends RawModule {
+class sdramChisel(laneCount: Int = 1) extends RawModule {
+  require(laneCount == 1 || laneCount == 2, "sdramChisel laneCount must be 1 or 2")
+
   val io = IO(Flipped(new SDRAMIO))
 
-  // Cross-domain signals (declared at RawModule scope for TriStateInBuf)
-  val memRdata = Wire(UInt(32.W))
-  val rValid   = Wire(Bool())
-  val dqIn     = Wire(UInt(32.W))
+  val dqOut32 = Wire(UInt(32.W))
+  val dqIn32  = Wire(UInt(32.W))
+  val dqOe    = Wire(Bool())
 
-  // ===================================================================
-  // Clock domain: io.clk (SDRAM clock = ~system clock)
-  // ===================================================================
+  val laneReadData  = Wire(Vec(2, UInt(16.W)))
+  val laneReadDrive = Wire(Vec(2, Bool()))
+  laneReadData.foreach(_ := 0.U)
+  laneReadDrive.foreach(_ := false.B)
+
   withClockAndReset(io.clk.asClock, false.B) {
+    val lanes = Seq.fill(laneCount)(Module(new SdramParticleCore))
 
-    // ---------------------------------------------------------------
-    // Command decoding: {cs, ras, cas, we} (all active low)
-    // ---------------------------------------------------------------
-    val cmd = Cat(io.cs, io.ras, io.cas, io.we)
+    for (idx <- 0 until laneCount) {
+      val lane = lanes(idx)
+      val dqmLo = idx * 2
+      val dqLo  = idx * 16
 
-    val CMD_LMR  = "b0000".U(4.W)  // LOAD MODE REGISTER
-    val CMD_AR   = "b0001".U(4.W)  // AUTO REFRESH       -> NOP
-    val CMD_PRE  = "b0010".U(4.W)  // PRECHARGE           -> NOP
-    val CMD_ACT  = "b0011".U(4.W)  // ACTIVE
-    val CMD_WR   = "b0100".U(4.W)  // WRITE
-    val CMD_RD   = "b0101".U(4.W)  // READ
-    val CMD_BT   = "b0110".U(4.W)  // BURST TERMINATE     -> NOP
-    val CMD_NOP  = "b0111".U(4.W)  // NOP
+      lane.io.cke := io.cke
+      lane.io.cs  := io.cs
+      lane.io.ras := io.ras
+      lane.io.cas := io.cas
+      lane.io.we  := io.we
+      lane.io.a   := io.a
+      lane.io.ba  := io.ba
+      lane.io.dqm := io.dqm(dqmLo + 1, dqmLo)
+      lane.io.writeData := dqIn32(dqLo + 15, dqLo)
 
-    val cmdValid = io.cke  // Commands only valid when CKE is high
-
-    // ---------------------------------------------------------------
-    // Mode Register
-    //   A[2:0]  — Burst Length  (000=1, 001=2, 010=4, 011=8)
-    //   A[6:4]  — CAS Latency   (010=2, 011=3)
-    // ---------------------------------------------------------------
-    val modeReg = RegInit(0.U(13.W))
-    when(cmdValid && cmd === CMD_LMR) {
-      modeReg := io.a
+      laneReadData(idx) := lane.io.readData
+      laneReadDrive(idx) := lane.io.readDrive
     }
 
-    val burstLen = MuxLookup(modeReg(2, 0), 1.U(4.W))(Seq(
-      0.U  ->  1.U,
-      1.U  ->  2.U,
-      2.U  ->  4.U,
-      3.U  ->  8.U
-    ))
-
-    val casLatency = Mux(modeReg(6, 4) === "b011".U, 3.U, 2.U)
-
-    // ---------------------------------------------------------------
-    // Bank Row Registers — 4 banks, each stores the active row
-    // ---------------------------------------------------------------
-    val rowReg = SyncReadMem(4, UInt(13.W))
-    val rowRegRdata = rowReg.read(io.ba)
-    when(cmdValid && cmd === CMD_ACT) {
-      rowReg.write(io.ba, io.a)
-    }
-
-    // ---------------------------------------------------------------
-    // Main memory array — 16M x 32-bit = 64 MB
-    // ---------------------------------------------------------------
-    val memDepth = 1 << 24  // 16,777,216
-    val mem = SyncReadMem(memDepth, Vec(4, UInt(8.W)))
-
-    // ===============================================================
-    // Read Pipeline
-    // ===============================================================
-    val rAddr = RegInit(0.U(24.W))
-    val rCnt  = RegInit(0.U(4.W))
-
-    when(cmdValid && cmd === CMD_RD) {
-      rAddr := Cat(rowRegRdata, io.ba, io.a(8, 0))
-      rCnt  := burstLen
-    }.elsewhen(rCnt =/= 0.U) {
-      rAddr := rAddr + 1.U
-      rCnt  := rCnt - 1.U
-    }
-
-    // Synchronous read memory (1 cycle latency)
-    val rawReadData = mem.read(rAddr)
-    memRdata := Cat(rawReadData(3), rawReadData(2), rawReadData(1), rawReadData(0))
-
-    // Read valid delay register — combined with SyncReadMem's 1-cycle
-    // latency to achieve CAS Latency = 2 timing.
-    val rValidReg = RegInit(false.B)
-    rValidReg := (rCnt =/= 0.U)
-    rValid := rValidReg
-
-    // ===============================================================
-    // Write Pipeline
-    // ===============================================================
-    val wAddr = RegInit(0.U(24.W))
-    val wCnt  = RegInit(0.U(4.W))
-
-    val we = WireDefault(false.B)
-    val wa = WireDefault(0.U(24.W))
-    val wd = WireDefault(0.U(32.W))
-    val wq = WireDefault(0.U(4.W))
-
-    when(cmdValid && cmd === CMD_WR) {
-      // First beat: data present on DQ bus same cycle as WRITE command
-      we    := true.B
-      wa    := Cat(rowRegRdata, io.ba, io.a(8, 0))
-      wd    := dqIn
-      wq    := io.dqm
-      wCnt  := burstLen - 1.U
-      wAddr := Cat(rowRegRdata, io.ba, io.a(8, 0)) + 1.U
-    }.elsewhen(wCnt =/= 0.U) {
-      // Subsequent beats (for BL > 1)
-      we    := true.B
-      wa    := wAddr
-      wd    := dqIn
-      wq    := io.dqm
-      wCnt  := wCnt - 1.U
-      wAddr := wAddr + 1.U
-    }
-
-    // Single write port with byte masking
-    when(we) {
-      val ww = Wire(Vec(4, UInt(8.W)))
-      ww(0) := wd(7, 0)    // byte 0 (LSB)
-      ww(1) := wd(15, 8)   // byte 1
-      ww(2) := wd(23, 16)  // byte 2
-      ww(3) := wd(31, 24)  // byte 3 (MSB)
-
-      val mm = Wire(Vec(4, Bool()))
-      // DQM active high: 1 = mask (do not write)
-      // mask = ~dqm  (true = write, false = mask)
-      mm(0) := ~wq(0)
-      mm(1) := ~wq(1)
-      mm(2) := ~wq(2)
-      mm(3) := ~wq(3)
-
-      mem.write(wa, ww, mm)
+    if (laneCount == 2) {
+      assert(lanes(0).io.readDrive === lanes(1).io.readDrive,
+        "Bit-extended SDRAM lanes must drive read data in lockstep")
     }
   }
 
-  // ===================================================================
-  // Tri-state data bus — outside clock domain (combinational)
-  // ===================================================================
-  dqIn := TriStateInBuf(io.dq, memRdata, rValid)
+  dqOut32 := Cat(laneReadData(1), laneReadData(0))
+  dqOe := laneReadDrive.asUInt.orR
+  dqIn32 := TriStateInBuf(io.dq, dqOut32, dqOe)
 
-  // Read data bypass — works around Verilator hierarchical tri-state issue
-  io.dataOut := memRdata
+  // Read data bypass — works around Verilator hierarchical tri-state issue.
+  io.dataOut := dqOut32
 }
 
 // =====================================================================

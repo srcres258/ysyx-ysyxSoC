@@ -31,6 +31,9 @@ object Config {
     while (sz < cap) sz <<= 1
     sz
   }
+
+  require(!sdramWordExt || sdramBitExt,
+    "SDRAM word extension requires bit extension to be enabled")
 }
 
 class ysyxSoCTop extends Module {
