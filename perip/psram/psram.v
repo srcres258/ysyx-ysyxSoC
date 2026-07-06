@@ -9,6 +9,7 @@
  *   4. QPI mode (4-4-4): 上电为 SPI/QSPI 模式, 收到 0x35 命令后切换到 QPI 模式,
  *      在 QPI 模式下命令以 4-bit 传输 (2 个 sck 周期); 收到 0xF5 退出.
  *      地址/数据捕获与 SPI 模式一致 (addr_cnt=0, 相同 nibble 时序).
+ *   5. 采用 byte-addressable 语义, EBh/38h 保持默认 1024-byte wrap burst, 直到 CE# 结束.
  */
 module psram #(
   parameter ADDR_BITS    = 22,
@@ -22,7 +23,7 @@ module psram #(
   localparam CMD_CYCLES     = 8;
   localparam CMD_QPI_CYCLES = 2;
   localparam ADDR_CYCLES    = 6;
-  localparam DATA_CYCLES    = 8;
+  localparam WRAP_BITS      = 10;
 
   localparam S_IDLE     = 0;
   localparam S_CMD      = 1;
@@ -44,20 +45,20 @@ module psram #(
   reg [7:0]           memory [0:MEM_SIZE-1];
   reg [3:0]           state;
   reg [7:0]           command;
-  reg [ADDR_BITS-1:0] address;
+  reg [23:0]          address;
+  reg [ADDR_BITS-1:0] burst_addr;
   reg [5:0]           cmd_cnt, addr_cnt, dummy_cnt, data_cnt;
-  reg                 addr_wait, data_wait;
-  wire [1:0]          data_idx;
-
-  wire [ADDR_BITS-1:0] eff_addr;
-  assign eff_addr = address >> 4;
+  wire [ADDR_BITS-1:0] burst_addr_next;
+  assign burst_addr_next = {
+    burst_addr[ADDR_BITS-1:WRAP_BITS],
+    burst_addr[WRAP_BITS-1:0] + 10'd1
+  };
 
   reg                 io_oe;
   reg [3:0]           io_out;
   assign dio = io_oe ? io_out : 4'bzzzz;
 
-  wire [7:0] memory_data = memory[eff_addr + data_idx];
-  assign data_idx = data_cnt[2:1];
+  wire [7:0] memory_data = memory[burst_addr];
 
   integer i;
   initial begin
@@ -65,12 +66,11 @@ module psram #(
     state = S_IDLE;
     command = 0;
     address = 0;
+    burst_addr = 0;
     cmd_cnt = 0;
     addr_cnt = 0;
     dummy_cnt = 0;
     data_cnt = 0;
-    addr_wait = 0;
-    data_wait = 0;
     io_oe = 0;
     io_out = 0;
     for (i = 0; i < MEM_SIZE; i = i + 1)
@@ -85,12 +85,11 @@ module psram #(
       io_oe <= 0;
       command <= 0;
       address <= 0;
+      burst_addr <= 0;
       cmd_cnt <= 0;
       addr_cnt <= 0;
       dummy_cnt <= 0;
       data_cnt <= 0;
-      addr_wait <= 0;
-      data_wait <= 0;
     end
     else begin
       case (state)
@@ -127,7 +126,7 @@ module psram #(
                 {command[7:4], dio} == CMD_38_SHIFTED
               ) begin
                 // 进入 ADDR state 开始接收地址数据.
-                addr_cnt <= 0; addr_wait <= 1; state <= S_ADDR;
+                addr_cnt <= 0; state <= S_ADDR;
               end
               else begin
                 // unknown command, 返回 IDLE state.
@@ -151,7 +150,7 @@ module psram #(
               end
               else begin
                 // otherwise, 进入 ADDR state 开始接收地址数据.
-                addr_cnt <= 0; addr_wait <= 1; state <= S_ADDR;
+                addr_cnt <= 0; state <= S_ADDR;
               end
             end
             else begin
@@ -160,12 +159,7 @@ module psram #(
           end
         end
         S_ADDR: begin
-          if (addr_wait) begin
-            addr_wait <= 0;
-          end
-          else begin
-            address[23-(addr_cnt*4) -: 4] <= dio;
-          end
+          address[23-(addr_cnt*4) -: 4] <= dio;
           if (addr_cnt == ADDR_CYCLES - 1) begin
             if (qpi_mode) begin
               // QPI mode: use the captured CMD_LO nibble.
@@ -179,8 +173,9 @@ module psram #(
                 command == CMD_38H ||
                 command == CMD_38_SHIFTED
               ) begin
-                data_cnt <= 0; data_wait <= 1;
-                state    <= S_DATA_IN;
+                  burst_addr <= {address[ADDR_BITS-1:4], dio};
+                  data_cnt <= 0;
+                  state    <= S_DATA_IN;
               end
               else begin
                 state <= S_IDLE;
@@ -197,7 +192,8 @@ module psram #(
                 command == CMD_38H ||
                 command == CMD_38_SHIFTED
               ) begin
-                data_cnt <= 0; data_wait <= 1;
+                burst_addr <= {address[ADDR_BITS-1:4], dio};
+                data_cnt <= 0;
                 state    <= S_DATA_IN;
               end
               else begin
@@ -206,11 +202,13 @@ module psram #(
             end
           end
           else begin
-            if (!addr_wait)
-              addr_cnt <= addr_cnt + 1;
+            addr_cnt <= addr_cnt + 1;
           end
         end
         S_DUMMY: begin
+          if (dummy_cnt == 0 && (command == CMD_EBH || command == CMD_EB_SHIFTED)) begin
+            burst_addr <= address[ADDR_BITS-1:0];
+          end
           if (dummy_cnt == DUMMY_CYCLES - 1) begin
             if (qpi_mode) begin
               if (
@@ -244,32 +242,26 @@ module psram #(
           end
         end
         S_DATA_OUT: begin
-          if (data_cnt == DATA_CYCLES) begin
-            io_oe <= 0; state <= S_IDLE;
+          if (data_cnt[0]) begin
+            burst_addr <= burst_addr_next;
           end
-          else data_cnt <= data_cnt + 1;
+          data_cnt <= data_cnt + 1;
         end
         S_DATA_IN: begin
-          if (data_cnt == DATA_CYCLES)
-            state <= S_IDLE;
-          else begin
-            if (data_wait) begin
-              data_wait <= 0;
-            end
-            else if (data_cnt[0]) begin
-              memory[eff_addr + data_idx][0] <= dio[0];
-              memory[eff_addr + data_idx][1] <= dio[1];
-              memory[eff_addr + data_idx][2] <= dio[2];
-              memory[eff_addr + data_idx][3] <= dio[3];
-            end
-            else begin
-              memory[eff_addr + data_idx][4] <= dio[0];
-              memory[eff_addr + data_idx][5] <= dio[1];
-              memory[eff_addr + data_idx][6] <= dio[2];
-              memory[eff_addr + data_idx][7] <= dio[3];
-            end
-            data_cnt <= data_cnt + 1;
+          if (data_cnt[0]) begin
+            memory[burst_addr][0] <= dio[0];
+            memory[burst_addr][1] <= dio[1];
+            memory[burst_addr][2] <= dio[2];
+            memory[burst_addr][3] <= dio[3];
+            burst_addr <= burst_addr_next;
           end
+          else begin
+            memory[burst_addr][4] <= dio[0];
+            memory[burst_addr][5] <= dio[1];
+            memory[burst_addr][6] <= dio[2];
+            memory[burst_addr][7] <= dio[3];
+          end
+          data_cnt <= data_cnt + 1;
         end
         default: begin
           state <= S_IDLE;
@@ -280,7 +272,7 @@ module psram #(
 
   // ---- 读数据输出: negedge sck (在下一个 posedge 前稳定) ----
   always @(negedge sck) begin
-    if (!ce_n && state == S_DATA_OUT && data_cnt < DATA_CYCLES) begin
+    if (!ce_n && state == S_DATA_OUT) begin
       io_out[0] <= data_cnt[0] ? memory_data[0] : memory_data[4];
       io_out[1] <= data_cnt[0] ? memory_data[1] : memory_data[5];
       io_out[2] <= data_cnt[0] ? memory_data[2] : memory_data[6];

@@ -69,7 +69,7 @@ module tb_psram;
   //
   // 各阶段消耗的 SCK 周期数 (含内部状态转移):
   //   send_cmd:        9 周期 (8 位命令 + 1 转移)
-  //   send_addr:       7 周期 (6 四线地址拍 + 1 转移)
+  //   send_addr:       6 周期 (6 四线地址拍)
   //   wait_dummy(n):   n+1 周期 (n dummy + 1 转移到 S_DATA_OUT)
   //   recv_data:       9 周期 (8 四线数据拍 + 1 转移到 S_IDLE)
   //   send_data:       9 周期 (同上)
@@ -98,7 +98,7 @@ module tb_psram;
   task psram_send_addr;
     input [23:0] addr;
     integer j;
-      begin
+    begin
       for (j = 5; j >= 0; j = j - 1) begin
         @(negedge sck);
         dio_drive = addr[j*4 +: 4];
@@ -112,7 +112,7 @@ module tb_psram;
     input [5:0] n;
     begin
       dio_oe = 0;
-      repeat (n + 1) @(posedge sck);
+      repeat (n) @(posedge sck);
     end
   endtask
 
@@ -160,6 +160,34 @@ module tb_psram;
         end
       end
       @(negedge sck);
+    end
+  endtask
+
+  // --- 发送 1 字节写数据 (四线) ---
+  task psram_send_data_byte;
+    input [7:0] data;
+    begin
+      @(negedge sck);
+      dio_oe = 1;
+      dio_drive = data[7:4];
+      @(posedge sck);
+      @(negedge sck);
+      dio_drive = data[3:0];
+      @(posedge sck);
+    end
+  endtask
+
+  // --- 接收 1 字节读数据 (四线) ---
+  task psram_recv_data_byte;
+    output [7:0] data;
+    reg [7:0] tmp;
+    begin
+      dio_oe = 0;
+      @(posedge sck);
+      tmp[7:4] = dio;
+      @(posedge sck);
+      tmp[3:0] = dio;
+      data = tmp;
     end
   endtask
 
@@ -238,6 +266,61 @@ module tb_psram;
                    j, rdata32[j*8 +: 8], wdata[j*8 +: 8]);
           end
         end
+        test_fail = test_fail + 1;
+      end else begin
+        $display("    PASS");
+        test_pass = test_pass + 1;
+      end
+    end
+  endtask
+
+  // --- 连续 burst 写入 (按 seed + index 生成字节) ---
+  task psram_write_burst_pattern;
+    input [23:0] addr;
+    input integer nbytes;
+    input [7:0] seed;
+    integer idx;
+    reg [7:0] byte_val;
+    begin
+      $display("  [TEST] Burst Write @ addr=0x%06h len=%0d seed=0x%02h", addr, nbytes, seed);
+      psram_send_cmd(CMD_QUAD_IO_WRITE);
+      psram_send_addr(addr);
+      for (idx = 0; idx < nbytes; idx = idx + 1) begin
+        byte_val = seed + idx[7:0];
+        psram_send_data_byte(byte_val);
+      end
+      @(negedge sck);
+    end
+  endtask
+
+  // --- 连续 burst 读取并按 seed + index 比对 ---
+  task psram_check_burst_pattern;
+    input [23:0] addr;
+    input integer nbytes;
+    input [7:0] seed;
+    input [8*64-1:0] test_name;
+    integer idx;
+    reg [7:0] byte_val;
+    reg [7:0] got;
+    reg mismatch;
+    begin
+      $display("  [TEST] %0s: Burst Read @ addr=0x%06h len=%0d", test_name, addr, nbytes);
+      mismatch = 0;
+      psram_send_cmd(CMD_QUAD_IO_READ);
+      psram_send_addr(addr);
+      psram_wait_dummy(DUMMY_CLOCKS);
+      for (idx = 0; idx < nbytes; idx = idx + 1) begin
+        byte_val = seed + idx[7:0];
+        psram_recv_data_byte(got);
+        if (got !== byte_val) begin
+          mismatch = 1;
+          $error("    FAIL: byte[%0d] read=0x%02h, expected=0x%02h",
+                 idx, got, byte_val);
+        end
+      end
+      psram_end_op();
+
+      if (mismatch) begin
         test_fail = test_fail + 1;
       end else begin
         $display("    PASS");
@@ -419,6 +502,55 @@ module tb_psram;
       end
     end
 
+    // 4d: 读取中途 CE# 拉高
+    begin
+      reg [7:0] got0, got1;
+      $display("  [TEST] CE# abort during read, then re-read @ addr=0x000508");
+      exp32 = {8'h88, 8'h87, 8'h86, 8'h85};
+
+      psram_send_cmd(CMD_QUAD_IO_WRITE);
+      psram_send_addr(24'h000508);
+      psram_send_data(exp32);
+      psram_end_op();
+
+      psram_send_cmd(CMD_QUAD_IO_READ);
+      psram_send_addr(24'h000508);
+      psram_wait_dummy(DUMMY_CLOCKS);
+      psram_recv_data_byte(got0);
+      psram_recv_data_byte(got1);
+      if (got0 !== exp32[7:0] || got1 !== exp32[15:8]) begin
+        $error("    FAIL: read data before abort mismatch");
+        test_fail = test_fail + 1;
+      end
+
+      ce_n = 1;
+      dio_oe = 0;
+      @(posedge sck);
+      #1;
+      if (dio !== 4'bzzzz) begin
+        $error("    FAIL: DIO not high-Z after CE# abort during read");
+        test_fail = test_fail + 1;
+      end else begin
+        $display("    PASS: CE# abort during read tri-states DIO");
+        test_pass = test_pass + 1;
+      end
+
+      psram_send_cmd(CMD_QUAD_IO_READ);
+      psram_send_addr(24'h000508);
+      psram_wait_dummy(DUMMY_CLOCKS);
+      psram_recv_data(rdata32);
+      psram_end_op();
+
+      if (rdata32 !== exp32) begin
+        $error("    FAIL: read-back after abort mismatch");
+        $display("      read=0x%08h, expected=0x%08h", rdata32, exp32);
+        test_fail = test_fail + 1;
+      end else begin
+        $display("    PASS: CE# abort during read recovery OK");
+        test_pass = test_pass + 1;
+      end
+    end
+
     // --------------------------------------------------------
     // Test 5: 边界地址
     // --------------------------------------------------------
@@ -499,6 +631,26 @@ module tb_psram;
 
       test_quad_read(24'h000600, exp32, "Verify after read-then-write");
     end
+
+    // --------------------------------------------------------
+    // Test 7: Byte-addressable burst, wrap, and unaligned access
+    // --------------------------------------------------------
+    $display("\n=== Test 7: Burst / wrap / unaligned behavior ===");
+
+    // 7a: Unaligned address burst
+    psram_write_burst_pattern(24'h000003, 12, 8'h30);
+    psram_end_op();
+    psram_check_burst_pattern(24'h000003, 12, 8'h30, "Unaligned 12-byte burst");
+
+    // 7b: Long burst beyond the old 4-byte window
+    psram_write_burst_pattern(24'h000120, 20, 8'h40);
+    psram_end_op();
+    psram_check_burst_pattern(24'h000120, 20, 8'h40, "Long 20-byte burst");
+
+    // 7c: Default 1024-byte wrap burst across 1KB boundary
+    psram_write_burst_pattern(24'h0003FC, 16, 8'hA0);
+    psram_end_op();
+    psram_check_burst_pattern(24'h0003FC, 16, 8'hA0, "1024-byte wrap burst");
 
     // ============================================================
     // 测试总结
