@@ -65,9 +65,7 @@ module tb_psram;
   // ============================================================
   //
   // 时序说明:
-  //   PSRAM 模型在 SCK 下降沿采样输入、更新输出.
-  //   测试平台在 SCK 上升沿驱动新数据, 保证下降沿前有足够的建立时间.
-  //   CE# 拉低后的第一个下降沿: PSRAM 进入 S_IDLE, 采样 dio[0] 作为命令 MSB.
+  //   PSRAM 模型在 SCK 上升沿采样输入, master 在下降沿切换后续数据.
   //
   // 各阶段消耗的 SCK 周期数 (含内部状态转移):
   //   send_cmd:        9 周期 (8 位命令 + 1 转移)
@@ -82,16 +80,17 @@ module tb_psram;
     input [7:0] cmd;
     integer j;
     begin
+      @(negedge sck);
       ce_n = 0;
       dio_oe = 1;
       dio_drive = {3'b000, cmd[7]};
-      @(posedge sck);    // PSRAM: S_IDLE → 采样 MSB → S_CMD
+      @(posedge sck);
 
       for (j = 6; j >= 0; j = j - 1) begin
-        dio_drive = {3'b000, cmd[j]};  // 先驱动, PSRAM 在随后的下降沿采样
+        @(negedge sck);
+        dio_drive = {3'b000, cmd[j]};
         @(posedge sck);
       end
-      @(posedge sck);    // 转移: PSRAM → S_ADDR
     end
   endtask
 
@@ -99,12 +98,12 @@ module tb_psram;
   task psram_send_addr;
     input [23:0] addr;
     integer j;
-    begin
+      begin
       for (j = 5; j >= 0; j = j - 1) begin
-        dio_drive = addr[j*4 +: 4];  // 先驱动
+        @(negedge sck);
+        dio_drive = addr[j*4 +: 4];
         @(posedge sck);
       end
-      @(posedge sck);    // 转移: → S_DUMMY (Read) 或 S_DATA_IN (Write)
     end
   endtask
 
@@ -146,14 +145,21 @@ module tb_psram;
     input [31:0] data;
     integer j;
     begin
+      @(negedge sck);
       dio_oe = 1;
+      dio_drive = data[7:4];
+      @(posedge sck);
       for (j = 0; j < 4; j = j + 1) begin
-        dio_drive = data[j*8+4 +: 4];  // 高半字节, 先驱动
+        @(negedge sck);
+        dio_drive = data[j*8 +: 4];
         @(posedge sck);
-        dio_drive = data[j*8 +: 4];    // 低半字节, 先驱动
-        @(posedge sck);
+        if (j < 3) begin
+          @(negedge sck);
+          dio_drive = data[(j+1)*8+4 +: 4];
+          @(posedge sck);
+        end
       end
-      @(posedge sck);    // 转移: PSRAM → S_IDLE
+      @(negedge sck);
     end
   endtask
 

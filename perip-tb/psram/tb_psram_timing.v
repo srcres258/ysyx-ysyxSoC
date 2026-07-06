@@ -80,27 +80,28 @@ module tb_psram_timing;
     input [7:0] c;
     integer j;
     begin
+      @(negedge sck);
       ce_n = 0;
       dio_oe = 1;
       dio_drive = {3'b000, c[7]};  // MSB
       @(posedge sck);
       for (j = 6; j >= 0; j = j - 1) begin
+        @(negedge sck);
         dio_drive = {3'b000, c[j]};
         @(posedge sck);
       end
-      @(posedge sck);  // transition
     end
   endtask
 
   task drive_addr;
     input [23:0] a;
     integer j;
-    begin
+      begin
       for (j = 5; j >= 0; j = j - 1) begin
+        @(negedge sck);
         dio_drive = a[j*4 +: 4];
         @(posedge sck);
       end
-      @(posedge sck);  // transition
     end
   endtask
 
@@ -108,14 +109,21 @@ module tb_psram_timing;
     input [31:0] d;
     integer j;
     begin
+      @(negedge sck);
       dio_oe = 1;
+      dio_drive = d[7:4];
+      @(posedge sck);
       for (j = 0; j < 4; j = j + 1) begin
-        dio_drive = d[j*8+4 +: 4];
-        @(posedge sck);
+        @(negedge sck);
         dio_drive = d[j*8 +: 4];
         @(posedge sck);
+        if (j < 3) begin
+          @(negedge sck);
+          dio_drive = d[(j+1)*8+4 +: 4];
+          @(posedge sck);
+        end
       end
-      @(posedge sck);  // transition
+      @(negedge sck);  // transition
     end
   endtask
 

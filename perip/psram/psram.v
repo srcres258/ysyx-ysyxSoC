@@ -3,16 +3,11 @@
 /** IS66WVS4M8ALL PSRAM 行为模型
  *
  * 修复:
- *   1. 控制器在 negedge sck 采样 din, 与原模型输出在同一时刻, 存在竞争.
- *      修复: io_out 在 posedge sck 单独更新, 确保数据在控制器采样前稳定.
- *   2. 命令/地址因 1 周期相位偏差产生固定左移:
- *      - 命令: 左移 1 位 (EBh→0xD6, 38h→0x70)
- *      - 地址: 左移 4 位 (一个 nibble)
- *      修复: 命令匹配使用移位值; 地址使用 eff_addr = address>>4.
+ *   1. 主 FSM 直接在 posedge sck 读取 dio, 与 master 的 negedge 改变边沿分离.
+ *   2. 读数据输出保持在 posedge sck 更新 io_out, 让控制器在下一个采样点看到稳定值.
  *   3. CE# 复位时清除 address/command 寄存器.
  *   4. QPI mode (4-4-4): 上电为 SPI/QSPI 模式, 收到 0x35 命令后切换到 QPI 模式,
  *      在 QPI 模式下命令以 4-bit 传输 (2 个 sck 周期); 收到 0xF5 退出.
- *      QPI 命令相位补偿: S_IDLE 捕获 CMD_LO nibble, 匹配 command[7:4].
  *      地址/数据捕获与 SPI 模式一致 (addr_cnt=0, 相同 nibble 时序).
  */
 module psram #(
@@ -51,6 +46,7 @@ module psram #(
   reg [7:0]           command;
   reg [ADDR_BITS-1:0] address;
   reg [5:0]           cmd_cnt, addr_cnt, dummy_cnt, data_cnt;
+  reg                 addr_wait, data_wait;
   wire [1:0]          data_idx;
 
   wire [ADDR_BITS-1:0] eff_addr;
@@ -73,14 +69,16 @@ module psram #(
     addr_cnt = 0;
     dummy_cnt = 0;
     data_cnt = 0;
+    addr_wait = 0;
+    data_wait = 0;
     io_oe = 0;
     io_out = 0;
     for (i = 0; i < MEM_SIZE; i = i + 1)
       memory[i] = 0;
   end
 
-  // ---- 主状态机: negedge sck (命令/地址/写数据捕获, 状态转换) ----
-  always @(negedge sck or posedge ce_n) begin
+  // ---- 主状态机: posedge sck (命令/地址/写数据捕获, 状态转换) ----
+  always @(posedge sck or posedge ce_n) begin
     if (ce_n) begin
       // ce_n 激活意味着状态机不工作. 保持 initial state 避免 undefined behaviour.
       state <= S_IDLE;
@@ -91,6 +89,8 @@ module psram #(
       addr_cnt <= 0;
       dummy_cnt <= 0;
       data_cnt <= 0;
+      addr_wait <= 0;
+      data_wait <= 0;
     end
     else begin
       case (state)
@@ -113,22 +113,21 @@ module psram #(
             // QPI mode: capture lower nibble (command[3:0])
             command[3:0] <= dio;
             if (cmd_cnt == CMD_QPI_CYCLES - 1) begin
-              // QPI mode: compare the captured CMD_LO nibble.
               if (
-                command[7:4] == CMD_F5H[3:0] ||
-                command[7:4] == CMD_F5_SHIFTED[3:0]
+                {command[7:4], dio} == CMD_F5H ||
+                {command[7:4], dio} == CMD_F5_SHIFTED
               ) begin
                 // QPI Mode Exit, F5h
                 qpi_mode <= 0; state <= S_IDLE;
               end
               else if (
-                command[7:4] == CMD_EBH[3:0] ||
-                command[7:4] == CMD_EB_SHIFTED[3:0] ||
-                command[7:4] == CMD_38H[3:0] ||
-                command[7:4] == CMD_38_SHIFTED[3:0]
+                {command[7:4], dio} == CMD_EBH ||
+                {command[7:4], dio} == CMD_EB_SHIFTED ||
+                {command[7:4], dio} == CMD_38H ||
+                {command[7:4], dio} == CMD_38_SHIFTED
               ) begin
                 // 进入 ADDR state 开始接收地址数据.
-                addr_cnt <= 0; state <= S_ADDR;
+                addr_cnt <= 0; addr_wait <= 1; state <= S_ADDR;
               end
               else begin
                 // unknown command, 返回 IDLE state.
@@ -152,7 +151,7 @@ module psram #(
               end
               else begin
                 // otherwise, 进入 ADDR state 开始接收地址数据.
-                addr_cnt <= 0; state <= S_ADDR;
+                addr_cnt <= 0; addr_wait <= 1; state <= S_ADDR;
               end
             end
             else begin
@@ -161,48 +160,44 @@ module psram #(
           end
         end
         S_ADDR: begin
-          address[20-(addr_cnt*4)] <= dio[0];
-          address[21-(addr_cnt*4)] <= dio[1];
-          if (addr_cnt > 0) begin
-            address[22-(addr_cnt*4)] <= dio[2];
-            address[23-(addr_cnt*4)] <= dio[3];
+          if (addr_wait) begin
+            addr_wait <= 0;
+          end
+          else begin
+            address[23-(addr_cnt*4) -: 4] <= dio;
           end
           if (addr_cnt == ADDR_CYCLES - 1) begin
             if (qpi_mode) begin
               // QPI mode: use the captured CMD_LO nibble.
               if (
-                command[7:4] == CMD_EBH[3:0] ||
-                command[7:4] == CMD_EB_SHIFTED[3:0]
+                command == CMD_EBH ||
+                command == CMD_EB_SHIFTED
               ) begin
                 dummy_cnt <= 0; state <= S_DUMMY;
               end
               else if (
-                command[7:4] == CMD_38H[3:0] ||
-                command[7:4] == CMD_38_SHIFTED[3:0]
+                command == CMD_38H ||
+                command == CMD_38_SHIFTED
               ) begin
-                // QPI 写: 在转换周期同时捕获第一个写数据 nibble (D7:4)
-                memory[eff_addr][4] <= dio[0];
-                memory[eff_addr][5] <= dio[1];
-                memory[eff_addr][6] <= dio[2];
-                memory[eff_addr][7] <= dio[3];
-                data_cnt <= 1;   // 已捕获 upper nibble
+                data_cnt <= 0; data_wait <= 1;
                 state    <= S_DATA_IN;
               end
-              else
+              else begin
                 state <= S_IDLE;
+              end
             end
             else begin
-              if (command == CMD_EBH || command == CMD_EB_SHIFTED) begin
+              if (
+                command == CMD_EBH ||
+                command == CMD_EB_SHIFTED
+              ) begin
                 dummy_cnt <= 0; state <= S_DUMMY;
               end
-              else if (command == CMD_38H || command == CMD_38_SHIFTED) begin
-                // 关键: 在转换周期同时捕获第一个写数据 nibble (D7:4)
-                // 以避免因过渡周期导致数据错位 (nibble swap)
-                memory[eff_addr][4] <= dio[0];
-                memory[eff_addr][5] <= dio[1];
-                memory[eff_addr][6] <= dio[2];
-                memory[eff_addr][7] <= dio[3];
-                data_cnt <= 1;   // 已捕获 upper nibble
+              else if (
+                command == CMD_38H ||
+                command == CMD_38_SHIFTED
+              ) begin
+                data_cnt <= 0; data_wait <= 1;
                 state    <= S_DATA_IN;
               end
               else begin
@@ -211,15 +206,16 @@ module psram #(
             end
           end
           else begin
-            addr_cnt <= addr_cnt + 1;
+            if (!addr_wait)
+              addr_cnt <= addr_cnt + 1;
           end
         end
         S_DUMMY: begin
           if (dummy_cnt == DUMMY_CYCLES - 1) begin
             if (qpi_mode) begin
               if (
-                command[7:4] == CMD_EBH[3:0] ||
-                command[7:4] == CMD_EB_SHIFTED[3:0]
+                command == CMD_EBH ||
+                command == CMD_EB_SHIFTED
               ) begin
                 io_oe <= 1;
                 data_cnt <= 0;
@@ -230,14 +226,22 @@ module psram #(
               end
             end
             else begin
-              if (command == CMD_EBH || command == CMD_EB_SHIFTED) begin
-                data_cnt <= 0; io_oe <= 1; state <= S_DATA_OUT;
+              if (
+                command == CMD_EBH ||
+                command == CMD_EB_SHIFTED
+              ) begin
+                data_cnt <= 0;
+                io_oe <= 1;
+                state <= S_DATA_OUT;
               end
               else begin
                 state <= S_IDLE;
               end
             end
-          end else dummy_cnt <= dummy_cnt + 1;
+          end
+          else begin
+            dummy_cnt <= dummy_cnt + 1;
+          end
         end
         S_DATA_OUT: begin
           if (data_cnt == DATA_CYCLES) begin
@@ -249,7 +253,10 @@ module psram #(
           if (data_cnt == DATA_CYCLES)
             state <= S_IDLE;
           else begin
-            if (data_cnt[0]) begin
+            if (data_wait) begin
+              data_wait <= 0;
+            end
+            else if (data_cnt[0]) begin
               memory[eff_addr + data_idx][0] <= dio[0];
               memory[eff_addr + data_idx][1] <= dio[1];
               memory[eff_addr + data_idx][2] <= dio[2];
@@ -271,8 +278,8 @@ module psram #(
     end
   end
 
-  // ---- 读数据输出: posedge sck, 在控制器采样前输出 ----
-  always @(posedge sck) begin
+  // ---- 读数据输出: negedge sck (在下一个 posedge 前稳定) ----
+  always @(negedge sck) begin
     if (!ce_n && state == S_DATA_OUT && data_cnt < DATA_CYCLES) begin
       io_out[0] <= data_cnt[0] ? memory_data[0] : memory_data[4];
       io_out[1] <= data_cnt[0] ? memory_data[1] : memory_data[5];
@@ -281,4 +288,3 @@ module psram #(
     end
   end
 endmodule
-
