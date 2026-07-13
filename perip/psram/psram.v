@@ -11,6 +11,9 @@
  *      地址/数据捕获与 SPI 模式一致 (addr_cnt=0, 相同 nibble 时序).
  *   5. 采用 byte-addressable 语义, EBh/38h 保持默认 1024-byte wrap burst, 直到 CE# 结束.
  */
+import "DPI-C" function void psram_read(input int addr, output byte data);
+import "DPI-C" function void psram_write(input int addr, input byte data);
+
 module psram #(
   parameter ADDR_BITS    = 22,
   parameter DUMMY_CYCLES = 6
@@ -58,7 +61,8 @@ module psram #(
   reg [3:0]           io_out;
   assign dio = io_oe ? io_out : 4'bzzzz;
 
-  wire [7:0] memory_data = memory[burst_addr];
+  reg [7:0] memory_data;
+  reg [7:0] next_byte;
 
   integer i;
   initial begin
@@ -249,17 +253,22 @@ module psram #(
         end
         S_DATA_IN: begin
           if (data_cnt[0]) begin
-            memory[burst_addr][0] <= dio[0];
-            memory[burst_addr][1] <= dio[1];
-            memory[burst_addr][2] <= dio[2];
-            memory[burst_addr][3] <= dio[3];
+            next_byte = memory_data;
+            next_byte[4] = dio[0];
+            next_byte[5] = dio[1];
+            next_byte[6] = dio[2];
+            next_byte[7] = dio[3];
+            memory_data <= next_byte;
+            psram_write(burst_addr, next_byte);
             burst_addr <= burst_addr_next;
           end
           else begin
-            memory[burst_addr][4] <= dio[0];
-            memory[burst_addr][5] <= dio[1];
-            memory[burst_addr][6] <= dio[2];
-            memory[burst_addr][7] <= dio[3];
+            psram_read(burst_addr, next_byte);
+            next_byte[0] = dio[0];
+            next_byte[1] = dio[1];
+            next_byte[2] = dio[2];
+            next_byte[3] = dio[3];
+            memory_data <= next_byte;
           end
           data_cnt <= data_cnt + 1;
         end
@@ -273,6 +282,7 @@ module psram #(
   // ---- 读数据输出: negedge sck (在下一个 posedge 前稳定) ----
   always @(negedge sck) begin
     if (!ce_n && state == S_DATA_OUT) begin
+      psram_read(burst_addr, memory_data);
       io_out[0] <= data_cnt[0] ? memory_data[0] : memory_data[4];
       io_out[1] <= data_cnt[0] ? memory_data[1] : memory_data[5];
       io_out[2] <= data_cnt[0] ? memory_data[2] : memory_data[6];

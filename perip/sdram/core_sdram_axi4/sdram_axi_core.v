@@ -180,9 +180,11 @@ reg  [STATE_W-1:0]     target_state_q;
 reg  [STATE_W-1:0]     delay_state_q;
 
 // Address bits
-wire [SDRAM_ROW_W-1:0]  addr_col_w  = {{(SDRAM_ROW_W-SDRAM_COL_W){1'b0}}, ram_addr_w[SDRAM_COL_W:2], 1'b0};
-wire [SDRAM_ROW_W-1:0]  addr_row_w  = ram_addr_w[SDRAM_ADDR_W:SDRAM_COL_W+2+1];
-wire [SDRAM_BANK_W-1:0] addr_bank_w = ram_addr_w[SDRAM_COL_W+2:SDRAM_COL_W+2-1];
+// 32-bit AXI accesses consume 4 bytes per SDRAM column, so the column field
+// must use all 9 column bits above the 2 byte-lane bits.
+wire [SDRAM_ROW_W-1:0]  addr_col_w  = {{(SDRAM_ROW_W-SDRAM_COL_W){1'b0}}, ram_addr_w[SDRAM_COL_W+1:2]};
+wire [SDRAM_ROW_W-1:0]  addr_row_w  = ram_addr_w[SDRAM_ADDR_W+1:SDRAM_COL_W+4];
+wire [SDRAM_BANK_W-1:0] addr_bank_w = ram_addr_w[SDRAM_COL_W+3:SDRAM_COL_W+2];
 
 //-----------------------------------------------------------------
 // SDRAM State Machine

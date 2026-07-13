@@ -55,6 +55,64 @@ class sdram extends BlackBox {
 }
 
 // ---------------------------------------------------------------------
+// DPI-backed particle memory.  The NPC backend owns the canonical byte store,
+// so the SoC model reads/writes it through DPI instead of private RAM state.
+// ---------------------------------------------------------------------
+class SDRAMMemBundle extends Bundle {
+  val readAddr = Input(UInt(27.W))
+  val readEnable = Input(Bool())
+  val readData = Output(UInt(16.W))
+
+  val writeAddr = Input(UInt(27.W))
+  val writeEnable = Input(Bool())
+  val writeData = Input(UInt(16.W))
+  val writeMask = Input(UInt(2.W))
+}
+
+class SDRAMMemImplDPIC extends BlackBox with HasBlackBoxInline {
+  val io = IO(new SDRAMMemBundle {
+    val clock = Input(Bool())
+  })
+
+  setInline(
+    "SDRAMMemImplDPIC.v",
+    """module SDRAMMemImplDPIC(
+      |    input clock,
+      |    input [26:0] readAddr,
+      |    input readEnable,
+      |    output reg [15:0] readData,
+      |
+      |    input [26:0] writeAddr,
+      |    input writeEnable,
+      |    input [15:0] writeData,
+      |    input [1:0] writeMask
+      |);
+      |    import "DPI-C" function void sdram_read(input int addr, output byte data);
+      |    import "DPI-C" function void sdram_write(input int addr, input byte data);
+      |
+      |    reg [7:0] lo;
+      |    reg [7:0] hi;
+      |
+      |    always @(posedge clock) begin
+      |        if (readEnable) begin
+      |            sdram_read(readAddr, lo);
+      |            sdram_read(readAddr + 1, hi);
+      |            readData <= {hi, lo};
+      |        end else begin
+      |            readData <= 0;
+      |        end
+      |
+      |        if (writeEnable) begin
+      |            if (!writeMask[0]) sdram_write(writeAddr, writeData[7:0]);
+      |            if (!writeMask[1]) sdram_write(writeAddr + 1, writeData[15:8]);
+      |        end
+      |    end
+      |endmodule
+    """.stripMargin
+  )
+}
+
+// ---------------------------------------------------------------------
 // Internal MT48LC16M16A2 x16 particle core.
 //
 // This core models one physical SDRAM particle in the digital domain:
@@ -67,7 +125,7 @@ class sdram extends BlackBox {
 // model DRAM-cell electrical retention. This matches the ysyx lecture's
 // intended simulation scope while staying command-correct.
 // ---------------------------------------------------------------------
-class SdramParticleCore extends Module {
+class SdramParticleCore(addrShift: Int, laneOffsetBytes: Int, baseOffsetBytes: Long) extends Module {
   val io = IO(new Bundle {
     val cke = Input(Bool())
     val cs  = Input(Bool())
@@ -129,9 +187,6 @@ class SdramParticleCore extends Module {
 
   def mkAddr(row: UInt, bank: UInt, col: UInt): UInt = Cat(row, bank, col)
 
-  val memDepth = 1 << 24
-  val mem = SyncReadMem(memDepth, Vec(2, UInt(8.W)))
-
   val readAddr      = RegInit(0.U(24.W))
   val readRemain    = RegInit(0.U(4.W))
   val readBank      = RegInit(0.U(2.W))
@@ -149,6 +204,17 @@ class SdramParticleCore extends Module {
   val writeFireAddr = WireDefault(0.U(24.W))
   val writeFireData = WireDefault(0.U(16.W))
   val writeFireMask = WireDefault(0.U(2.W))
+
+  val mem = Module(new SDRAMMemImplDPIC)
+  val baseOffset = baseOffsetBytes.U(27.W)
+  val laneOffset = laneOffsetBytes.U(27.W)
+  mem.io.clock := clock.asBool
+  mem.io.readAddr := baseOffset + Cat(readIssueAddr, 0.U(addrShift.W)) + laneOffset
+  mem.io.readEnable := readIssue
+  mem.io.writeAddr := baseOffset + Cat(writeFireAddr, 0.U(addrShift.W)) + laneOffset
+  mem.io.writeEnable := writeFire
+  mem.io.writeData := writeFireData
+  mem.io.writeMask := writeFireMask
 
   when(isLmr) {
     assert(allBanksIdle, "SDRAM LMR requires all banks idle")
@@ -249,18 +315,7 @@ class SdramParticleCore extends Module {
     writeAddr := writeAddr + 1.U
   }
 
-  when(writeFire) {
-    val writeBytes = Wire(Vec(2, UInt(8.W)))
-    writeBytes(0) := writeFireData(7, 0)
-    writeBytes(1) := writeFireData(15, 8)
-
-    val writeEnable = Wire(Vec(2, Bool()))
-    writeEnable(0) := !writeFireMask(0)
-    writeEnable(1) := !writeFireMask(1)
-    mem.write(writeFireAddr, writeBytes, writeEnable)
-  }
-
-  val rawReadData = mem.read(readIssueAddr, readIssue)
+  val rawReadData = mem.io.readData
   val readValidD1 = RegNext(readIssue, false.B)
   val readValidD2 = RegNext(readValidD1, false.B)
   val readValidD3 = RegNext(readValidD2, false.B)
@@ -269,7 +324,7 @@ class SdramParticleCore extends Module {
   val readDataStage2 = RegInit(0.U(16.W))
 
   when(readValidD1) {
-    readDataStage1 := Cat(rawReadData(1), rawReadData(0))
+    readDataStage1 := rawReadData
   }
   when(readValidD2) {
     readDataStage2 := readDataStage1
@@ -289,7 +344,7 @@ class SdramParticleCore extends Module {
 // laneCount=2 : two x16 particles in bit-extension mode, forming a 32-bit
 //               SDRAM controller channel while preserving per-particle state
 // ---------------------------------------------------------------------
-class sdramChisel(laneCount: Int = 1) extends RawModule {
+class sdramChisel(laneCount: Int = 1, baseOffsetBytes: Long = 0L) extends RawModule {
   require(laneCount == 1 || laneCount == 2, "sdramChisel laneCount must be 1 or 2")
 
   val io = IO(Flipped(new SDRAMIO))
@@ -304,7 +359,10 @@ class sdramChisel(laneCount: Int = 1) extends RawModule {
   laneReadDrive.foreach(_ := false.B)
 
   withClockAndReset(io.clk.asClock, false.B) {
-    val lanes = Seq.fill(laneCount)(Module(new SdramParticleCore))
+    val lanes = Seq.tabulate(laneCount) { idx =>
+      val addrShift = if (laneCount == 2) 2 else 1
+      Module(new SdramParticleCore(addrShift, idx * 2, baseOffsetBytes))
+    }
 
     for (idx <- 0 until laneCount) {
       val lane = lanes(idx)
