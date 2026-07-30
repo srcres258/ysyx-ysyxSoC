@@ -254,20 +254,20 @@ module psram #(
         S_DATA_IN: begin
           if (data_cnt[0]) begin
             next_byte = memory_data;
-            next_byte[4] = dio[0];
-            next_byte[5] = dio[1];
-            next_byte[6] = dio[2];
-            next_byte[7] = dio[3];
+            next_byte[0] = dio[0];
+            next_byte[1] = dio[1];
+            next_byte[2] = dio[2];
+            next_byte[3] = dio[3];
             memory_data <= next_byte;
             psram_write(burst_addr, next_byte);
             burst_addr <= burst_addr_next;
           end
           else begin
             psram_read(burst_addr, next_byte);
-            next_byte[0] = dio[0];
-            next_byte[1] = dio[1];
-            next_byte[2] = dio[2];
-            next_byte[3] = dio[3];
+            next_byte[4] = dio[0];
+            next_byte[5] = dio[1];
+            next_byte[6] = dio[2];
+            next_byte[7] = dio[3];
             memory_data <= next_byte;
           end
           data_cnt <= data_cnt + 1;
