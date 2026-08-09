@@ -2,15 +2,11 @@ V_FILE_GEN   = build/ysyxSoCTop.sv
 V_FILE_FINAL = build/ysyxSoCFull.v
 SCALA_FILES = $(shell find src/ -name "*.scala")
 
-# Firtool version
-FIRTOOL_VERSION = 1.105.0
-FIRTOOL_PATCH_DIR = $(shell pwd)/patch/firtool
-
 $(V_FILE_FINAL): $(SCALA_FILES)
-# Replace firtool with a newer version
-# TODO: This can be removed after chisel publishes a new version
-	@./patch/update-firtool.sh $(FIRTOOL_VERSION) $(FIRTOOL_PATCH_DIR)
-	CHISEL_FIRTOOL_PATH=$(FIRTOOL_PATCH_DIR)/firtool-$(FIRTOOL_VERSION)/bin \
+	@command -v firtool >/dev/null 2>&1 || { \
+		echo "firtool not found on PATH. Please enter the nix dev shell first or provide firtool in PATH."; \
+		exit 1; \
+	}
 	mill -i ysyxsoc.runMain ysyx.Elaborate --target-dir $(@D)
 	mv $(V_FILE_GEN) $@
 	sed -i -e 's/_\(aw\|ar\|w\|r\|b\)_\(\|bits_\)/_\1/g' $@
